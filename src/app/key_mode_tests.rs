@@ -889,6 +889,69 @@ fn the_chip_row_keeps_the_controls_and_tab_arrows_at_640() {
     }
 }
 
+#[test]
+fn downloads_keep_controls_reachable_with_modes_sidebar_tabs_and_actual_zoom() {
+    for (width, height, scale) in [
+        (640., 480., 1.),
+        (960., 720., 1.5),
+        (1024., 768., 1.5),
+        (1200., 900., 1.5),
+        (1024., 700., 1.),
+    ] {
+        for sidebar in [false, true] {
+            for sequence in [false, true] {
+                let (mut ws, _rx) = tabbed_workspace("split");
+                ws.settings.ui_scale = scale;
+                ws.settings.hosts[0].label = "a-very-long-host-name-to-test-truncation".into();
+                ws.settings.vertical_tabs = sidebar;
+                ws.sidebar.set_open(sidebar);
+                with_modes(&mut ws, false);
+                with_download(&mut ws);
+                let name = "a-very-long-build-artifact-download.iso";
+                ws.hosts[0].model.downloads[0].name = Some(name.into());
+                let (sender, _sent) = flume::unbounded();
+                for block in ["block:b", "block:c"] {
+                    framed_terminal(&mut ws, block, &sender, b"$ cargo test\r\nok");
+                }
+                let mut rt = runtime_at(ws, (width, height));
+                settle(&mut rt);
+                assert_eq!(rt.state.ui_scale(), scale, "the zoom must not be clamped");
+                let note =
+                    format!("{width}x{height} @{scale}, sidebar={sidebar}, sequence={sequence}");
+                bar_controls_fit(&rt, width, &format!("{note}: no mode control"));
+                let grid = rect(&rt, "grid:block:b");
+                ctrl(&mut rt, Code::KeyL, 'l');
+                if sequence {
+                    ctrl(&mut rt, Code::KeyB, 'b');
+                }
+                settle(&mut rt);
+                assert_eq!(chip_text(&rt).as_deref(), Some(LONG));
+                bar_controls_fit(&rt, width, &note);
+                assert_eq!(rect(&rt, "grid:block:b"), grid, "{note}: unchanged grid");
+                for key in ["commands", "new-tab", "settings", "close-app"] {
+                    assert!(rect(&rt, key)[2] >= 26. * scale - 0.5, "{note}: {key}");
+                }
+                for key in ["previous-tabs", "next-tabs"] {
+                    if has(&rt, key) {
+                        assert!(rect(&rt, key)[2] >= 25.5 * scale, "{note}: {key}");
+                    }
+                }
+                let download_visible = sidebar || !sequence || width / scale >= 1000.;
+                assert_eq!(has(&rt, "download-chip"), download_visible, "{note}");
+                if let Some(download) = rt
+                    .elements()
+                    .into_iter()
+                    .find(|e| !e.exiting && e.key.as_deref() == Some("download-chip"))
+                {
+                    assert!(download.label.as_deref().unwrap().contains(name));
+                    assert!(download.help.as_deref().unwrap().contains(name));
+                }
+                std::fs::remove_file(&rt.state.settings_path).ok();
+            }
+        }
+    }
+}
+
 /// The name-only composition is the narrow one; a wide bar still names the chip's own word.
 #[test]
 fn a_narrow_bar_drops_the_mode_word_and_a_wide_one_keeps_it() {
@@ -915,6 +978,40 @@ fn a_narrow_bar_drops_the_mode_word_and_a_wide_one_keeps_it() {
             Some("Key mode: resize"),
             "{size:?}: the accessible name keeps the word"
         );
+        std::fs::remove_file(&rt.state.settings_path).ok();
+    }
+}
+
+#[test]
+fn mode_chip_draws_with_downloads_at_narrow_effective_widths() {
+    let Some(mut camera) = super::pane_verb_tests::Camera::new() else {
+        return;
+    };
+    let _families = rune::text::with_families("Inter", "IBM Plex Mono");
+    for (prefix, size, scale, sidebar) in [
+        ("mode-download-sidebar", (640., 480.), 1., true),
+        ("mode-download-zoom", (1024., 768.), 1.5, false),
+    ] {
+        let mut rt = painted_runtime(size, false);
+        rt.update(|s, _| {
+            s.settings.vertical_tabs = sidebar;
+            s.sidebar.set_open(sidebar);
+            s.settings.ui_scale = scale;
+            with_download(s);
+            s.hosts[0].model.downloads[0].name =
+                Some("a-very-long-build-artifact-download.iso".into());
+        });
+        settle(&mut rt);
+        assert_eq!(rt.state.ui_scale(), scale);
+        camera.snap(&mut rt, &format!("{prefix}-before"));
+        ctrl(&mut rt, Code::KeyL, 'l');
+        settle(&mut rt);
+        bar_controls_fit(&rt, size.0, prefix);
+        camera.snap(&mut rt, &format!("{prefix}-mode"));
+        ctrl(&mut rt, Code::KeyB, 'b');
+        settle(&mut rt);
+        bar_controls_fit(&rt, size.0, prefix);
+        camera.snap(&mut rt, &format!("{prefix}-sequence"));
         std::fs::remove_file(&rt.state.settings_path).ok();
     }
 }

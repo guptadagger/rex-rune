@@ -40,8 +40,11 @@ terminal could look unresponsive with nothing on screen to explain it.
   name. The live chip row shares one budget: on a narrow bar with a live chip the identity
   chip keeps its existing 120 pt floor instead of growing to its words, the mode and
   pending-sequence chips shrink no further than their floors (56 and 48 pt), and the tab
-  track keeps a floor that holds both 26 pt arrows inside it, so Settings and Close stay in
-  the window. It takes no focus, has no press handler, and reserves no space when no mode is
+  track keeps a floor that holds both 26 pt arrows inside it. Downloads also uses effective
+  toolbar width: with sidebar tabs it gives up its full filename when a mode shares a narrow
+  bar or a pending sequence. Its full name and progress remain in the tooltip and accessible
+  label, so Settings and Close stay in the window. The mode chip takes no focus, has no press
+  handler, and reserves no space when no mode is
   active.
 - **The entry notice is gone.** The chip replaces "Key mode: … · Escape to leave", which only
   ever described the start of a mode. An unknown mode name still gets its notice, since
@@ -74,6 +77,11 @@ listed them as optional, and the chip is chrome like the pending sequence.
   Close app are inside the window in that order, both tab arrows are inside their track and
   clear the mode chip, the chip keeps at least 40 pt for its name, and the whole name stays in
   its accessible label and tooltip;
+- a receiving download with a long filename, sidebar or toolbar tabs and a pending sequence
+  on/off: all mandatory controls and usable tab arrows fit at 640×480/100%,
+  960×720/150%, 1024×768/150%, 1200×900/150% and 1024×700/100%. Each case first checks
+  the no-mode control, then enters the long mode through real key dispatch; the scale is
+  asserted unclamped, the terminal grid stays fixed and full download names remain accessible;
 - the mode word is drawn at 1024×700 and dropped at 640×480, with `Key mode: resize` the
   accessible name at both;
 - the unified macOS title row and its title strip name the mode in the row;
@@ -88,6 +96,8 @@ Real-font captures (`REX_TEST_SNAP_DIR`, one test at a time as fonts are process
 `mode_chip_draws` (1024×700), `mode_chip_draws_at_the_minimum_size` (640×480) and
 `mode_chip_draws_with_a_pending_sequence` (both sizes) write no mode, `resize`, a long
 truncated name, the title row and a long mode beside a pending sequence.
+`mode_chip_draws_with_downloads_at_narrow_effective_widths` adds before/mode/sequence
+captures with sidebar tabs at 640×480 and toolbar tabs at 1024×768/150%.
 
 ## Limits
 
@@ -101,5 +111,5 @@ truncated name, the title row and a long mode beside a pending sequence.
   scrolling content is unchanged; this is chrome width, never a terminal resize.
 - The chip reflects only this client's mode stack. A mode another client entered, and a mode
   a host's keymap defines but nobody entered, are not named.
-- Width checks use the 480-pt-high fixture, whose interface scale is already at its layout
-  floor, so they prove 640 wide at effective 100% rather than every zoom.
+- The download coexistence matrix exercises actual, unclamped 150% zoom at the three sizes
+  above, not every viewport/zoom combination or a native high-DPI/window-manager setup.
