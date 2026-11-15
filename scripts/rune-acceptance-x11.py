@@ -220,10 +220,11 @@ class Desktop:
 
     def close(self):
         # Terminate every child this run owns, then wait for each (bounded, then a kill) before
-        # the caller removes the files they were writing to.
+        # the caller removes the files they were writing to. The handles stay here afterwards,
+        # already reaped: the scripts that import this helper wait on them again in their own
+        # finally, and a second close is harmless.
         for p in [*self.apps, self.wm, self.server]:
             stop_owned(p)
-        self.apps, self.wm, self.server = [], None, None
         if self.stub is not None:
             shutil.rmtree(self.stub, ignore_errors=True)
             self.stub = None

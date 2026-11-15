@@ -1698,9 +1698,14 @@ impl Workspace {
     pub fn layer_menu(&mut self, target: PaneTarget) {
         let title = format!("{} · {}", target.tab, target.name);
         let anchor = self.panel.as_ref().and_then(|p| p.anchor);
+        // The layer this menu is about, captured once with its host, connection epoch and tab.
+        // Every later rebuild and Enter validate this snapshot; they never recapture the pane
+        // from wherever it has moved to since.
+        let layer = self.layer_target(&target);
         self.open_panel(PanelKind::Layer, &title, &[]);
         let panel = self.panel.as_mut().expect("the layer menu");
         panel.target = Some(target);
+        panel.layer = layer;
         panel.anchor = anchor;
         if let Some(first) = self.entries().iter().position(|e| e.enabled) {
             self.panel.as_mut().unwrap().selected = first;

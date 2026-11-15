@@ -1360,3 +1360,354 @@ fn the_layer_menu_shows_each_bound_verbs_effective_shortcut_and_keeps_a_reason()
     let (entries, at) = find_row(&ws, "Return pane to tiles");
     assert_eq!(entries[at].detail, layers::Blocked::NoAnchor.hint());
 }
+
+/// Draw the open list as it is now, so its rows have drawn rectangles and the pointer's hover
+/// has run. One second of frames settles the popup's entry and the keyboard's scroll.
+fn draw(rt: &mut Runtime<Workspace>) {
+    for _ in 0..60 {
+        rt.frame(1. / 60.);
+    }
+}
+
+/// The row `label` occupies in the open list, as Enter's selection sees it.
+fn row_index(rt: &Runtime<Workspace>, label: &str) -> usize {
+    rt.state
+        .entries()
+        .iter()
+        .position(|entry| entry.label == label)
+        .unwrap_or_else(|| panic!("no {label} row"))
+}
+
+/// The drawn rectangle of the open list's row `label`, which is what the pointer can hit.
+fn row_rect(rt: &Runtime<Workspace>, label: &str) -> [f32; 4] {
+    let key = format!("entry:{}", row_index(rt, label));
+    rt.elements()
+        .into_iter()
+        .find(|element| !element.exiting && element.key.as_deref() == Some(key.as_str()))
+        .unwrap_or_else(|| panic!("{label} is not drawn"))
+        .rect
+}
+
+/// Move the pointer onto `label`'s row, as a person moving the mouse over it does.
+fn hover(rt: &mut Runtime<Workspace>, label: &str) {
+    draw(rt);
+    let [x, y, w, h] = row_rect(rt, label);
+    rt.pointer_move(x + w / 2., y + h / 2.);
+    draw(rt);
+}
+
+/// The floating layers in `ids` order, back to front, after the tiled layer.
+fn reorder_layers(ws: &mut Workspace, ids: &[&str]) {
+    let window = &mut ws.hosts[0]
+        .model
+        .views
+        .get_mut("s")
+        .expect("a view")
+        .windows[0];
+    let mut layers = std::mem::take(&mut window.layers);
+    let tiled = layers
+        .iter()
+        .position(|layer| layer.layer_id.as_deref() == Some("tiled"))
+        .expect("the tiled layer");
+    let mut ordered = vec![layers.remove(tiled)];
+    for id in ids {
+        let at = layers
+            .iter()
+            .position(|layer| layer.layer_id.as_deref() == Some(*id))
+            .unwrap_or_else(|| panic!("no {id} layer"));
+        ordered.push(layers.remove(at));
+    }
+    assert!(layers.is_empty(), "every floating layer is named once");
+    window.layers = ordered;
+}
+
+/// Three floating layers whose names share a search word, so a filtered Commands list is
+/// short enough for every one of its rows to be drawn where the pointer can reach it.
+fn tagged_layers() -> (Workspace, flume::Receiver<HostCommand>) {
+    floating_workspace(
+        13,
+        vec![
+            tiled(&["block:a"]),
+            layer("alpha", None, &["block:z-alpha"]),
+            layer("beta", None, &["block:z-beta"]),
+            layer("gamma", None, &["block:z-gamma"]),
+        ],
+        "block:a",
+    )
+}
+
+/// Commands filtered to the three tagged layer rows, with the keyboard on the list.
+fn open_tagged_commands(rt: &mut Runtime<Workspace>) {
+    rt.update(|s, _| {
+        s.picker(false);
+        let panel = s.panel.as_mut().expect("the Commands list");
+        panel.inputs[0] = rune::TextEdit::new("show z-");
+        panel.inputs[0].focused = true;
+        s.query_changed();
+    });
+    draw(rt);
+    let labels: Vec<String> = rt.state.entries().into_iter().map(|e| e.label).collect();
+    assert_eq!(
+        labels,
+        ["Show z-alpha", "Show z-beta", "Show z-gamma"],
+        "{labels:?}"
+    );
+}
+
+/// F's layer submenu, opened from F's own pane menu with the keyboard, as a person does.
+fn open_layer_menu_from_keyboard(rt: &mut Runtime<Workspace>) {
+    rt.update(|s, _| s.pane_menu("block:f".into(), None));
+    draw(rt);
+    highlight(rt, "Floating layer…");
+    press(rt, Key::Enter);
+    assert!(
+        matches!(
+            rt.state.panel.as_ref().map(|panel| &panel.kind),
+            Some(PanelKind::Layer)
+        ),
+        "the pane menu's layer row opens the layer submenu"
+    );
+    assert_eq!(highlighted(rt), "New floating pane");
+}
+
+#[test]
+fn the_open_layer_menu_refuses_a_pane_another_client_moved_to_another_window() {
+    let (mut ws, rx) = tiled_and_floating("block:a");
+    ws.hosts[0]
+        .model
+        .views
+        .get_mut("s")
+        .expect("a view")
+        .windows
+        .push(
+            serde_json::from_value(json!({
+                "window_id": "next", "label": "next", "focused_block_id": "block:n",
+                "layers": [tiled(&["block:n"])],
+            }))
+            .expect("a second window"),
+        );
+    let mut rt = runtime(ws);
+    open_layer_menu_from_keyboard(&mut rt);
+    assert_eq!(rt.state.panel.as_ref().unwrap().title, "dev · f");
+
+    // Another client moves F into the other window and deletes the one the menu named. F is
+    // still in this session, so the menu stays open; it must still mean the tab it named.
+    rt.update(|s, _| {
+        let view = s.hosts[0].model.views.get_mut("s").expect("a view");
+        let moved = view.windows[0].layers.remove(1);
+        view.windows[1].layers.push(moved);
+        view.windows.remove(0);
+        view.active_window_id = Some("next".into());
+    });
+    rt.update(|s, _| wake(s));
+    draw(&mut rt);
+    assert!(
+        matches!(
+            rt.state.panel.as_ref().map(|panel| &panel.kind),
+            Some(PanelKind::Layer)
+        ),
+        "the pane is still in the session, so its menu stays"
+    );
+    assert_eq!(
+        rt.state.panel.as_ref().unwrap().title,
+        "dev · f",
+        "the open menu still names the tab it was opened on"
+    );
+    let (entries, at) = find_row(&rt.state, "New floating pane");
+    assert!(
+        !entries[at].enabled,
+        "the captured tab is gone; its row cannot run"
+    );
+    assert_eq!(entries[at].detail, layers::Blocked::Stale.hint());
+    press(&mut rt, Key::Enter);
+    let sent = requests(&rx);
+    assert!(
+        sent.is_empty(),
+        "Enter must not start the pane in the window F moved to: {sent:?}"
+    );
+}
+
+#[test]
+fn the_open_layer_menu_refuses_a_new_epoch_and_a_pane_or_tab_that_is_gone() {
+    for change in ["epoch", "pane", "tab"] {
+        let (ws, rx) = tiled_and_floating("block:a");
+        let mut rt = runtime(ws);
+        open_layer_menu_from_keyboard(&mut rt);
+        rt.update(|s, _| match change {
+            "epoch" => s.hosts[0].model.connection_epoch += 1,
+            "pane" => {
+                s.hosts[0].model.views.get_mut("s").unwrap().windows[0].layers[1]
+                    .blocks
+                    .clear();
+            }
+            "tab" => {
+                s.hosts[0]
+                    .model
+                    .views
+                    .get_mut("s")
+                    .unwrap()
+                    .windows
+                    .remove(0);
+            }
+            _ => unreachable!(),
+        });
+        rt.update(|s, _| wake(s));
+        draw(&mut rt);
+        if change == "epoch" {
+            let (entries, at) = find_row(&rt.state, "New floating pane");
+            assert!(
+                !entries[at].enabled,
+                "a new connection invalidates the menu"
+            );
+            assert_eq!(entries[at].detail, layers::Blocked::Stale.hint());
+        } else {
+            assert!(
+                rt.state.panel.is_none(),
+                "{change}: the menu's pane is gone, so the menu closes"
+            );
+        }
+        press(&mut rt, Key::Enter);
+        let sent = requests(&rx);
+        assert!(
+            sent.is_empty(),
+            "{change}: an invalidated menu must send nothing: {sent:?}"
+        );
+    }
+}
+
+#[test]
+fn the_open_layer_menu_still_starts_in_its_own_tab_when_another_client_raises_another() {
+    let (ws, rx) = tiled_and_floating("block:a");
+    let mut rt = runtime(ws);
+    open_layer_menu_from_keyboard(&mut rt);
+    assert_eq!(rt.state.panel.as_ref().unwrap().title, "dev · f");
+
+    // Another client raises the other tab. F never moved, so the menu's own tab still exists:
+    // its row runs, and it starts the pane in that tab, not the one now on screen.
+    rt.update(|s, _| {
+        let view = s.hosts[0].model.views.get_mut("s").expect("a view");
+        view.active_window_id = Some("other".into());
+        view.windows[1].focused_block_id = Some("block:o".into());
+    });
+    rt.update(|s, _| wake(s));
+    draw(&mut rt);
+    assert_eq!(rt.state.panel.as_ref().unwrap().title, "dev · f");
+    assert!(find_row(&rt.state, "New floating pane").0[0].enabled);
+    press(&mut rt, Key::Enter);
+    let sent = requests(&rx);
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(sent[0].1, "s");
+    assert_eq!(
+        sent[0].2["window_id"], "dev",
+        "the menu's tab, not the one raised"
+    );
+    assert_eq!(sent[0].2["cwd_from"], "block:f");
+}
+
+#[test]
+fn a_pointer_choice_survives_a_reorder_and_enter_runs_the_row_it_lit() {
+    let (ws, rx) = tagged_layers();
+    let mut rt = runtime(ws);
+    open_tagged_commands(&mut rt);
+    highlight(&mut rt, "Show z-beta");
+    let beta_before = row_index(&rt, "Show z-beta");
+    assert_eq!(
+        row_index(&rt, "Show z-alpha") + 1,
+        beta_before,
+        "the three layer rows are adjacent, alpha first"
+    );
+
+    // The pointer takes the selection to alpha; the keyboard's row no longer owns it.
+    hover(&mut rt, "Show z-alpha");
+    assert_eq!(highlighted(&rt), "Show z-alpha");
+
+    // Another client reorders the layers to [gamma, alpha, beta]; alpha now sits exactly where
+    // beta's keyboard identity was recorded.
+    rt.pointer_move(0., 0.);
+    rt.update(|s, _| reorder_layers(s, &["gamma", "alpha", "beta"]));
+    rt.update(|s, _| wake(s));
+    draw(&mut rt);
+    assert_eq!(
+        row_index(&rt, "Show z-alpha"),
+        beta_before,
+        "a stale keyboard identity would now point at alpha"
+    );
+    hover(&mut rt, "Show z-alpha");
+    assert_eq!(highlighted(&rt), "Show z-alpha");
+    press(&mut rt, Key::Enter);
+    let sent = requests(&rx);
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(
+        sent[0].2["layer_id"], "alpha",
+        "Enter ran the row the pointer lit, not the one the keyboard named earlier"
+    );
+}
+
+#[test]
+fn a_pointer_choice_on_the_keyboard_row_survives_its_removal() {
+    let (ws, rx) = tagged_layers();
+    let mut rt = runtime(ws);
+    open_tagged_commands(&mut rt);
+    highlight(&mut rt, "Show z-beta");
+    let beta = row_index(&rt, "Show z-beta");
+
+    // The pointer lands on the row the keyboard already had: the pointer owns the selection
+    // now, so the row's keyboard identity is retired.
+    hover(&mut rt, "Show z-beta");
+    assert_eq!(highlighted(&rt), "Show z-beta");
+
+    // Another client removes beta; gamma takes its place under the same highlight.
+    rt.pointer_move(0., 0.);
+    rt.update(|s, _| {
+        let window = &mut s.hosts[0].model.views.get_mut("s").unwrap().windows[0];
+        window
+            .layers
+            .retain(|layer| layer.layer_id.as_deref() != Some("beta"));
+    });
+    rt.update(|s, _| wake(s));
+    draw(&mut rt);
+    assert_eq!(row_index(&rt, "Show z-gamma"), beta);
+    assert_eq!(
+        highlighted(&rt),
+        "Show z-gamma",
+        "the highlight shows the row now at that index"
+    );
+    press(&mut rt, Key::Enter);
+    let sent = requests(&rx);
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(
+        sent[0].2["layer_id"], "gamma",
+        "Enter ran the visible row, never the removed one"
+    );
+}
+
+#[test]
+fn a_pointer_hover_after_a_removal_runs_the_row_it_lit_not_the_removed_one() {
+    let (ws, rx) = tagged_layers();
+    let mut rt = runtime(ws);
+    open_tagged_commands(&mut rt);
+    highlight(&mut rt, "Show z-beta");
+    let beta = row_index(&rt, "Show z-beta");
+    hover(&mut rt, "Show z-alpha");
+    assert_eq!(highlighted(&rt), "Show z-alpha");
+
+    rt.pointer_move(0., 0.);
+    rt.update(|s, _| {
+        let window = &mut s.hosts[0].model.views.get_mut("s").unwrap().windows[0];
+        window
+            .layers
+            .retain(|layer| layer.layer_id.as_deref() != Some("beta"));
+    });
+    rt.update(|s, _| wake(s));
+    draw(&mut rt);
+    assert_eq!(row_index(&rt, "Show z-gamma"), beta);
+    hover(&mut rt, "Show z-gamma");
+    assert_eq!(highlighted(&rt), "Show z-gamma");
+    press(&mut rt, Key::Enter);
+    let sent = requests(&rx);
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(
+        sent[0].2["layer_id"], "gamma",
+        "the hovered row ran; the removed beta was never retried"
+    );
+}

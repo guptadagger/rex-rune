@@ -47,6 +47,8 @@ jobs:
         run: cargo test --locked --all-features
       - name: Vendored SDK tests
         run: cargo test --manifest-path vendor/rexrs/Cargo.toml --all-features
+      - name: Acceptance fixture cleanup and isolation
+        run: python3 scripts/test-fixture-cleanup.py
 
   macos:
     name: macOS

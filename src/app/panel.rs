@@ -917,17 +917,12 @@ impl Workspace {
             }
             return entries;
         }
-        // The floating-layer menu: one verb per row, for the pane it was opened on. A verb
-        // that cannot run now says why in its hint column.
+        // The floating-layer menu: one verb per row, for the layer it captured when it opened.
+        // Rebuilding the list and Enter both validate that same snapshot, so a pane another
+        // client moved to another tab, or a new connection, is refused rather than retargeted.
+        // A verb that cannot run now says why in its hint column.
         if matches!(panel.kind, PanelKind::Layer) {
-            let Some(target) = panel
-                .target
-                .clone()
-                .or_else(|| self.focused_block().and_then(|b| self.target(&b)))
-            else {
-                return Vec::new();
-            };
-            let Some(layer) = self.layer_target(&target) else {
+            let Some(layer) = panel.layer.clone() else {
                 return Vec::new();
             };
             let mut entries = Vec::new();

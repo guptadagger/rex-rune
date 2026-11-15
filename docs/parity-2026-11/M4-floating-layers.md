@@ -244,6 +244,32 @@ to the floating layer), and the changelog no longer says the layer row keeps the
 scrolling: it moves six rows one level in, the layer menu fits at 640×480, and the longer pane
 menu still scrolls there.
 
+### Second review, of `d168709`
+
+- **`Desktop.close` broke the five scripts that wait on its handles.** It reset `apps`, `wm`
+  and `server` after reaping them, so their own `finally` raised `AttributeError` before the
+  private server, proxy or run root was removed. It now leaves the reaped handles in place: a
+  repeated `wait` returns at once and a second close terminates nothing again.
+  `scripts/test-fixture-cleanup.py` runs the exact `finally` of `status-sweep-private.py`,
+  `process-cwd-contract.py`, `server-settings-x11.py`, `readme-gallery.py` and
+  `insert-path-x11.py` against process doubles and checks each remaining cleanup. It also
+  covers repeated close, the timeout kill and wait, and a constructor that fails after starting
+  Xvfb. The same file checks that `floating-layers-private.py` gives itself an `XDG_DATA_HOME`
+  instead of inheriting the caller's, and still removes its run root when a tool is missing. It
+  runs in Linux CI and starts no real fixture process.
+- **The open layer submenu rebuilt its target on every rebuild and on Enter.** It kept only a
+  `PaneTarget`, so a pane another client moved to another tab was started there, and a new
+  connection epoch was adopted. The submenu now captures its `LayerTarget` once, in
+  `Panel.layer`; every rebuild and Enter validate that snapshot. Tests drive the real pane menu
+  → layer submenu → layout wake → Enter for a pane moved to another window with its tab
+  deleted, an epoch change, a pane or tab that disappeared, and the allowed case where another
+  tab is raised while the pane stays where the menu named it.
+- **Pointer selection could revive a stale keyboard row.** Hovering changed only `selected`, so
+  a later hover at the same index after a reorder or removal made Enter run the row the
+  keyboard had named. Hover now retires that identity (`Panel.row = None`), including when it
+  lands on the row the keyboard already had. Pointer and keyboard histories cover reorder,
+  same-index hover and removal; the keyboard-only identity tests are unchanged.
+
 ## Limits, and what slice 2 still owns
 
 - **No pointer drag or edge resize.** `resize_layer` is in the verified contract but no handle,

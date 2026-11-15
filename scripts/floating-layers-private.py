@@ -166,7 +166,7 @@ try:
     # the `finally` below removes them whatever happens next, a missing tool included.
     work = Path(tempfile.mkdtemp(prefix="issue136-float-", dir=BASE))
     for name in ("home", "home-b", "config", "config-b", "state", "state-b", "runtime", "cache",
-                 "captures", "tmp"):
+                 "data", "captures", "tmp"):
         (work / name).mkdir(mode=0o700)
     # Nothing of the caller's desktop, bus, agent or audio may reach this private session.
     for name in list(os.environ):
@@ -179,7 +179,8 @@ try:
     os.environ.update(
         HOME=str(work / "home"), XDG_CONFIG_HOME=str(work / "config"),
         XDG_STATE_HOME=str(work / "state"), XDG_RUNTIME_DIR=str(work / "runtime"),
-        XDG_CACHE_HOME=str(work / "cache"), TMPDIR=str(work / "tmp"),
+        XDG_CACHE_HOME=str(work / "cache"), XDG_DATA_HOME=str(work / "data"),
+        TMPDIR=str(work / "tmp"),
         REX_SERVER=endpoint, REX_CAPTURE_OUT=str(work / "captures"), REX_BIN=BINARY,
     )
     tempfile.tempdir = str(work / "tmp")
