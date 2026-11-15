@@ -557,6 +557,7 @@ impl Workspace {
         self.local_keymap = local_keymap(&self.settings);
         self.keymap_generation += 1;
         self.bindings.sequence.clear();
+        self.revalidate_key_modes();
         // Disconnected workers retain the declaration for their next successful connect too.
         let declaration = self.keymap_declaration();
         for index in 0..self.hosts.len() {

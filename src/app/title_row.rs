@@ -17,7 +17,8 @@ use super::{
     panes, tab_icons,
     theme::*,
     toolbar::{
-        activity_chip, chip_press, download_chip, identity_detail, sequence_chip, tab_track,
+        activity_chip, chip_press, download_chip, identity_detail, mode_chip, sequence_chip,
+        tab_track,
     },
     toolbar_reveal::bar_height,
     widgets::{chrome_button, glyph},
@@ -221,6 +222,7 @@ pub fn title_row(s: &Workspace) -> El {
         } else {
             title(s, merged)
         })
+        .children(mode_chip(s))
         .child(sequence_chip(s).unwrap_or_else(el))
         .children(activity_chip(s))
         .child(download_chip(s))

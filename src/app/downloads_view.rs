@@ -432,15 +432,16 @@ pub(super) const CHIP_FULL_WIDTH: f32 = 1000.;
 ///
 /// The tab strip gives way to every chip, so: the chip is short in a narrow window and while a
 /// key sequence is pending, and in a narrow window it steps aside for the pending-sequence chip
-/// (a moment's gap, and the strip keeps what little room it has). With the tabs in the sidebar
-/// nothing competes and the chip is always full.
+/// (a moment's gap, and the strip keeps what little room it has). Sidebar tabs leave room for
+/// the full label unless an active mode needs room on a narrow bar or beside a pending
+/// sequence. Width is measured in toolbar points, after interface zoom.
 pub fn chip_label(s: &Workspace) -> Option<ChipText> {
     let pending = s.bindings.sequence.depth > 0;
-    let narrow = s.viewport[0] < CHIP_FULL_WIDTH;
+    let narrow = s.viewport[0] / s.ui_scale() < CHIP_FULL_WIDTH;
     if !s.sidebar_tabs() && narrow && pending {
         return None;
     }
-    let compact = !s.sidebar_tabs() && (narrow || pending);
+    let compact = (!s.sidebar_tabs() || s.key_mode().is_some()) && (narrow || pending);
     let rows = s.download_rows();
     let running: Vec<&Row> = rows
         .iter()

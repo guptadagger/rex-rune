@@ -603,6 +603,10 @@ impl Workspace {
             );
         }
         self.hosts[index].model = model;
+        if index == self.active {
+            // The session, keymap revision or connection above is what a mode belongs to.
+            self.revalidate_key_modes();
+        }
         self.announce_keymap_problems(index);
         self.poll_remote_navigation(std::time::Instant::now());
         for pending in performs {
@@ -755,6 +759,48 @@ impl Workspace {
                 .overrides(super::recorder::layers(&self.settings)),
             overrides,
         }
+    }
+
+    /// The innermost active key mode, while it still belongs to the host, session and keymap on
+    /// screen. `input.rs` ends modes when any of those changes, and `revalidate_key_modes` does
+    /// the same where the change happens, so a mode left on another host or session never
+    /// names itself again on this one.
+    pub fn key_mode(&self) -> Option<&str> {
+        if *self.bindings.owner.as_ref()? != self.mode_owner() {
+            return None;
+        }
+        self.bindings.modes.last().map(|(name, _)| name.as_str())
+    }
+
+    /// What a mode entered now would belong to.
+    pub(super) fn mode_owner(&self) -> super::bindings::Owner {
+        let model = self.model();
+        super::bindings::Owner {
+            host: self.hosts[self.active].id,
+            session: model.selected.clone(),
+            generation: self.keymap_generation,
+            server_revision: model.keymap_revision,
+            connected: model.connected,
+        }
+    }
+
+    /// Enter a mode from an action the client accepted, by key or from a host's reply: the
+    /// stack belongs to the host, session, keymap and connection on screen from that moment,
+    /// so the name is drawn before the next key and never outlives them.
+    pub(super) fn enter_key_mode(&mut self, name: &str, once: bool) {
+        let owner = self.mode_owner();
+        self.bindings.adopt_modes(owner);
+        self.bindings.enter_mode(name, once);
+    }
+
+    /// End modes where their host, session, keymap or connection changes, rather than at the
+    /// next key: the declared ownership rule reaches the state change itself.
+    pub(super) fn revalidate_key_modes(&mut self) {
+        if self.bindings.modes.is_empty() {
+            return;
+        }
+        let owner = self.mode_owner();
+        self.bindings.adopt_modes(owner);
     }
 
     pub fn effective_keymap(&self) -> &rex_rune::keymap::Resolved {
@@ -1322,7 +1368,11 @@ impl Workspace {
         self.update_title(tx);
     }
 
+    /// Every active-host transition calls this. A key mode belongs to the host it was entered
+    /// on, so it ends here rather than at the next key: switching away and back must not bring
+    /// back a mode nobody entered again.
     pub fn update_visibility(&mut self) {
+        self.revalidate_key_modes();
         for term in self.terminals.values_mut() {
             term.end_selection();
         }

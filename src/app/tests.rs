@@ -26,6 +26,8 @@ mod find_tests;
 mod font_settings_tests;
 #[path = "header_fading_tests.rs"]
 mod header_fading_tests;
+#[path = "key_mode_tests.rs"]
+mod key_mode_tests;
 #[path = "menu_tests.rs"]
 mod menu_tests;
 #[path = "navigation_tests.rs"]
