@@ -1,0 +1,427 @@
+//! Floating layers: the pane-menu and Commands verbs of #136's first slice, and the one request
+//! each sends. The server owns membership, geometry, order and state; this module reads them
+//! from the cached session view and asks for one change at a time. It never invents layout,
+//! never changes a value optimistically, and never retargets: a captured layer that no longer
+//! matches the view is reported, with nothing sent. Pointer drag and edge resize are not here.
+use super::{
+    activity,
+    panel::{LayerAction, LayerTarget, PaneTarget},
+    workspace::Workspace,
+};
+use rex_rune::{connection::HostCommand, layers};
+use rexrs::api::session::{Layer, Window};
+use serde_json::{Value, json};
+
+impl Workspace {
+    /// The reason floating-layer actions cannot run on the host on screen, decided from the
+    /// negotiated revision before anything is sent.
+    pub fn layer_gate(&self) -> Option<layers::Blocked> {
+        let model = self.model();
+        layers::unsupported(model.connected, model.protocol.api_revision)
+    }
+
+    /// The layer holding the pane of a captured target, as a target for a layer verb.
+    pub fn layer_target(&self, target: &PaneTarget) -> Option<LayerTarget> {
+        let window = self.pane_window(target)?;
+        let layer = layers::layer_of(window, &target.block)?;
+        self.layer_target_in(target.host, &target.session, window, layer, &target.block)
+    }
+
+    /// The layer holding the focused pane of the tab on screen.
+    pub fn focused_layer(&self) -> Option<LayerTarget> {
+        let session = self.model().selected.clone()?;
+        let window = self.model().window()?;
+        let block = window.focused_block_id.clone()?;
+        let layer = layers::layer_of(window, &block)?;
+        self.layer_target_in(self.active, &session, window, layer, &block)
+    }
+
+    /// The floating layers of the tab on screen, back to front, named: the list Commands shows
+    /// so a minimized layer can be restored without its hidden pane's menu. Only the tab on
+    /// screen; nothing is read in the background for it.
+    pub fn floating_layer_targets(&self) -> Vec<LayerTarget> {
+        let Some(session) = self.model().selected.clone() else {
+            return Vec::new();
+        };
+        let Some(window) = self.model().window() else {
+            return Vec::new();
+        };
+        let mut targets = Vec::new();
+        for layer in layers::floating_layers(window) {
+            let Some(block) = layer.blocks.first().and_then(|b| b.block_id.clone()) else {
+                continue;
+            };
+            if let Some(target) = self.layer_target_in(self.active, &session, window, layer, &block)
+            {
+                targets.push(target);
+            }
+        }
+        targets
+    }
+
+    fn layer_target_in(
+        &self,
+        host: usize,
+        session: &str,
+        window: &Window,
+        layer: &Layer,
+        block: &str,
+    ) -> Option<LayerTarget> {
+        let state = self.hosts.get(host)?;
+        Some(LayerTarget {
+            host,
+            host_id: state.id,
+            epoch: state.model.connection_epoch,
+            session: session.into(),
+            window: window.window_id.clone()?,
+            layer: layer.layer_id.clone()?,
+            block: block.into(),
+            panes: layer
+                .blocks
+                .iter()
+                .filter_map(|b| b.block_id.clone())
+                .collect(),
+            pane_names: layer
+                .blocks
+                .iter()
+                .map(|b| activity::pane_name(&self.hosts[host].model, b, self.generated_titles()))
+                .collect(),
+            name: self.layer_name(host, layer),
+            floating: layers::floating(layer),
+            minimized: layers::minimized(layer),
+        })
+    }
+
+    /// The layer as the menu names it: its first pane, and how many more it holds.
+    fn layer_name(&self, host: usize, layer: &Layer) -> String {
+        let generated = self.generated_titles();
+        let model = &self.hosts[host].model;
+        let first = layer
+            .blocks
+            .first()
+            .map(|b| activity::pane_name(model, b, generated))
+            .unwrap_or_else(|| "Terminal".into());
+        match layer.blocks.len() {
+            0 | 1 => first,
+            n => format!("{first} +{}", n - 1),
+        }
+    }
+
+    /// The window a captured layer target names, while it is still the one the view shows on the
+    /// same connection: the host's ID, connection epoch, session and window must all match.
+    fn layer_window(&self, target: &LayerTarget) -> Option<&Window> {
+        let host = self.hosts.get(target.host)?;
+        if host.id != target.host_id || host.model.connection_epoch != target.epoch {
+            return None;
+        }
+        let view = host.model.views.get(&target.session)?;
+        view.windows
+            .iter()
+            .find(|w| w.window_id.as_deref() == Some(target.window.as_str()))
+    }
+
+    /// What stops `action` on this target now, checked against the cached view. None means it
+    /// can run. A captured layer that changed is [`layers::Blocked::Stale`], never a new target.
+    pub fn layer_blocked(
+        &self,
+        target: Option<&LayerTarget>,
+        action: LayerAction,
+    ) -> Option<layers::Blocked> {
+        if let Some(gate) = self.layer_gate() {
+            return Some(gate);
+        }
+        if action == LayerAction::NewFloating {
+            return self.new_floating_blocked();
+        }
+        let Some(target) = target else {
+            return Some(layers::Blocked::NoPane);
+        };
+        let Some(window) = self.layer_window(target) else {
+            return Some(layers::Blocked::Stale);
+        };
+        let Some(layer) = window
+            .layers
+            .iter()
+            .find(|l| l.layer_id.as_deref() == Some(target.layer.as_str()))
+        else {
+            return Some(layers::Blocked::Stale);
+        };
+        if !layer
+            .blocks
+            .iter()
+            .any(|b| b.block_id.as_deref() == Some(target.block.as_str()))
+        {
+            return Some(layers::Blocked::Stale);
+        }
+        let floating = layers::floating(layer);
+        match action {
+            LayerAction::NewFloating => None,
+            LayerAction::Float => floating.then_some(layers::Blocked::AlreadyFloating),
+            LayerAction::Minimize => {
+                if !floating {
+                    Some(layers::Blocked::NotFloating)
+                } else if layers::minimized(layer) {
+                    Some(layers::Blocked::Stale)
+                } else if layers::holds_last_visible(window, layer) {
+                    Some(layers::Blocked::LastVisible)
+                } else {
+                    None
+                }
+            }
+            LayerAction::Focus => (!floating).then_some(layers::Blocked::NotFloating),
+            LayerAction::Raise => {
+                if !floating {
+                    Some(layers::Blocked::NotFloating)
+                } else if layers::frontmost(window).and_then(|l| l.layer_id.as_deref())
+                    == Some(target.layer.as_str())
+                {
+                    Some(layers::Blocked::InFront)
+                } else {
+                    None
+                }
+            }
+            LayerAction::ReturnToTiles => {
+                if !floating {
+                    Some(layers::Blocked::NotFloating)
+                } else if layers::tiled_anchor(window, &target.block).is_none() {
+                    Some(layers::Blocked::NoAnchor)
+                } else {
+                    None
+                }
+            }
+            LayerAction::Close => {
+                if !floating {
+                    Some(layers::Blocked::NotFloating)
+                } else {
+                    let now: Vec<&str> = layer
+                        .blocks
+                        .iter()
+                        .filter_map(|b| b.block_id.as_deref())
+                        .collect();
+                    let captured: Vec<&str> = target.panes.iter().map(String::as_str).collect();
+                    (now != captured).then_some(layers::Blocked::Stale)
+                }
+            }
+        }
+    }
+
+    fn new_floating_blocked(&self) -> Option<layers::Blocked> {
+        let model = self.model();
+        if model.selected.is_none() {
+            return Some(layers::Blocked::NoTab);
+        }
+        match model.window() {
+            Some(window) if window.window_id.is_some() => None,
+            _ => Some(layers::Blocked::NoTab),
+        }
+    }
+
+    /// Run a layer verb on the focused pane's layer: the Commands and shortcut path. `New
+    /// floating pane` needs no pane, only a tab.
+    pub fn focused_layer_action(&mut self, action: LayerAction) {
+        if action == LayerAction::NewFloating {
+            self.new_floating_pane();
+            return;
+        }
+        let Some(target) = self.focused_layer() else {
+            let blocked = self
+                .layer_blocked(None, action)
+                .unwrap_or(layers::Blocked::NoPane);
+            self.inform(blocked.sentence());
+            return;
+        };
+        self.layer_action(target, action);
+    }
+
+    /// Run a layer verb on a captured target once, or say why it did not. A refused or stale
+    /// target sends nothing and is never retried.
+    pub fn layer_action(&mut self, target: LayerTarget, action: LayerAction) {
+        if let Some(blocked) = self.layer_blocked(Some(&target), action) {
+            self.inform(blocked.sentence());
+            return;
+        }
+        match action {
+            LayerAction::NewFloating => self.new_floating_pane(),
+            LayerAction::Float => self.layer_request(
+                &target,
+                "session.float_block",
+                json!({"block_id":target.block,"bounds":layers::REQUESTED_BOUNDS}),
+            ),
+            // The server keeps the block and its program; only the state changes.
+            LayerAction::Minimize => self.layer_request(
+                &target,
+                "session.set_layer_state",
+                json!({"layer_id":target.layer,"state":"minimized"}),
+            ),
+            // One call restores or focuses and raises, in one revision: no second request.
+            LayerAction::Focus => self.layer_request(
+                &target,
+                "session.set_layer_state",
+                json!({"layer_id":target.layer,"state":"normal","focus":true}),
+            ),
+            // Bring to front never focuses, so it is named for raising alone.
+            LayerAction::Raise => self.layer_request(
+                &target,
+                "session.raise_layer",
+                json!({"layer_id":target.layer}),
+            ),
+            LayerAction::ReturnToTiles => {
+                let anchor = self
+                    .layer_window(&target)
+                    .and_then(|window| layers::tiled_anchor(window, &target.block));
+                let Some(anchor) = anchor else {
+                    self.inform(layers::Blocked::NoAnchor.sentence());
+                    return;
+                };
+                self.layer_request(
+                    &target,
+                    "session.move_block",
+                    json!({
+                        "block_id": target.block,
+                        "anchor_block_id": anchor,
+                        "direction": layers::RETURN_DIRECTION,
+                        "side": layers::RETURN_SIDE,
+                        "ratio": layers::RETURN_RATIO,
+                    }),
+                );
+            }
+            LayerAction::Close => self.confirm_layer_close(target),
+        }
+    }
+
+    fn layer_request(&mut self, target: &LayerTarget, method: &str, payload: Value) {
+        let mut payload = payload;
+        payload["session_id"] = json!(target.session);
+        self.send(
+            target.host,
+            HostCommand::Request {
+                method: method.into(),
+                payload,
+            },
+        );
+    }
+
+    /// Ask before closing a floating layer: its name, every pane in it and what ends. Declining
+    /// sends nothing; a target that changed by the time it is confirmed closes nothing.
+    fn confirm_layer_close(&mut self, target: LayerTarget) {
+        let host = self.settings.hosts[target.host].label.clone();
+        let title = format!("Close {}?", target.name);
+        let description = close_words(&target, &host);
+        self.confirm(
+            &title,
+            "session.close_layer",
+            json!({"session_id":target.session,"layer_id":target.layer}),
+            &description,
+        );
+        self.panel.as_mut().unwrap().layer = Some(target);
+    }
+
+    /// The confirmed close: one `session.close_layer` for the layer the dialog named, and only
+    /// while that layer is still the one the view shows.
+    pub fn confirmed_layer_close(&mut self, target: &LayerTarget) {
+        if let Some(blocked) = self.layer_blocked(Some(target), LayerAction::Close) {
+            self.inform(blocked.sentence());
+            return;
+        }
+        let payload = json!({"session_id":target.session,"layer_id":target.layer});
+        self.send(
+            target.host,
+            HostCommand::Request {
+                method: "session.close_layer".into(),
+                payload,
+            },
+        );
+    }
+
+    /// One new terminal in a new floating layer of the tab on screen, from the same creation
+    /// path as a split: the host's shell and this client's theme, in the focused pane's folder.
+    /// No tab, session or server is created, and no existing pane moves.
+    pub fn new_floating_pane(&mut self) {
+        if let Some(blocked) = self.layer_blocked(None, LayerAction::NewFloating) {
+            self.inform(blocked.sentence());
+            return;
+        }
+        let model = self.model();
+        let (Some(session), Some(window)) = (model.selected.clone(), model.window()) else {
+            self.inform(layers::Blocked::NoTab.sentence());
+            return;
+        };
+        let Some(window_id) = window.window_id.clone() else {
+            self.inform(layers::Blocked::NoTab.sentence());
+            return;
+        };
+        let layout = self.new_terminal(self.active);
+        let payload = json!({
+            "window_id": window_id,
+            "bounds": layers::REQUESTED_BOUNDS,
+            "layout": layout,
+            "focus": true,
+        });
+        let from = self.focused_block();
+        self.open_terminal(
+            self.active,
+            "session.new_layer",
+            payload,
+            &session,
+            from.as_deref(),
+        );
+    }
+}
+
+/// The words a floating-layer close confirmation shows: every pane in the layer and what the
+/// call ends, for a layer another client may have made with several panes.
+fn close_words(target: &LayerTarget, host: &str) -> String {
+    let mut names = target.pane_names.iter();
+    match target.pane_names.len() {
+        0 => format!(
+            "Closes this empty floating layer on {host}. Closing the app itself keeps programs \
+             running."
+        ),
+        1 => format!(
+            "Ends the program in the floating pane {} on {host}. Closing the app itself keeps \
+             programs running.",
+            names.next().map(String::as_str).unwrap_or("Terminal")
+        ),
+        n => {
+            let first = names.next().map(String::as_str).unwrap_or("Terminal");
+            let rest: Vec<&str> = names.map(String::as_str).collect();
+            format!(
+                "Ends the programs in {n} floating panes on {host}: {first}, {}. Closing the app \
+                 itself keeps programs running.",
+                rest.join(", ")
+            )
+        }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn close_words_name_every_pane_and_the_host() {
+    let target = |names: &[&str]| LayerTarget {
+        host: 0,
+        host_id: crate::app::workspace::HostId(0),
+        epoch: 0,
+        session: "s".into(),
+        window: "w".into(),
+        layer: "l".into(),
+        block: "b".into(),
+        panes: names.iter().map(|n| n.to_string()).collect(),
+        pane_names: names.iter().map(|n| n.to_string()).collect(),
+        name: "one".into(),
+        floating: true,
+        minimized: false,
+    };
+    let one = close_words(&target(&["one"]), "test-0");
+    assert!(one.contains("floating pane one"), "{one}");
+    assert!(one.contains("test-0"), "{one}");
+    assert!(
+        one.contains("Closing the app itself keeps programs running"),
+        "{one}"
+    );
+    let three = close_words(&target(&["one", "two", "three"]), "test-0");
+    assert!(three.contains("3 floating panes"), "{three}");
+    for name in ["one", "two", "three"] {
+        assert!(three.contains(name), "{three}");
+    }
+    assert!(three.contains("Ends the programs"), "{three}");
+}

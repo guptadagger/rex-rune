@@ -1520,6 +1520,8 @@ impl Workspace {
                 );
             }
             Intent::Pane(target, action) => self.pane_action(target, action, tx),
+            Intent::Layer(target, action) => self.layer_action(target, action),
+            Intent::LayerMenu(target) => self.layer_menu(target),
             Intent::Session(target, action) => self.session_action(target, action, tx),
             Intent::AddHost => self.open_add_host(),
             Intent::StartSsh(host) => self.preview_ssh_start(host),
@@ -1688,6 +1690,20 @@ impl Workspace {
                     .flat_map(|l| &l.blocks)
                     .any(|b| b.block_id.as_deref() == Some(&target.block))
             })
+    }
+
+    /// The floating-layer verbs for a captured pane, anchored where the pane menu was: the
+    /// second page behind the pane menu's one layer row.
+    pub fn layer_menu(&mut self, target: PaneTarget) {
+        let title = format!("{} · {}", target.tab, target.name);
+        let anchor = self.panel.as_ref().and_then(|p| p.anchor);
+        self.open_panel(PanelKind::Layer, &title, &[]);
+        let panel = self.panel.as_mut().expect("the layer menu");
+        panel.target = Some(target);
+        panel.anchor = anchor;
+        if let Some(first) = self.entries().iter().position(|e| e.enabled) {
+            self.panel.as_mut().unwrap().selected = first;
+        }
     }
 
     pub fn pane_menu(&mut self, block: String, anchor: Option<(f32, f32)>) {
@@ -2289,8 +2305,15 @@ impl Workspace {
                 }
                 let target = self.panel.as_ref().and_then(|p| p.target.clone());
                 let session = self.panel.as_ref().and_then(|p| p.session.clone());
+                let layer = self.panel.as_ref().and_then(|p| p.layer.clone());
                 let tab = self.panel.as_ref().and_then(|p| p.tab.clone());
                 self.close_panel(tx);
+                // A layer close names its own session and layer: it never falls back to the
+                // session on screen, and a changed layer closes nothing.
+                if let Some(layer) = layer {
+                    self.confirmed_layer_close(&layer);
+                    return;
+                }
                 if let Some(tab) = tab {
                     self.confirmed_tab_close(&tab, &method, payload);
                     return;

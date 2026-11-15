@@ -22,6 +22,8 @@ mod directory_tests;
 mod downloads_tests;
 #[path = "find_tests.rs"]
 mod find_tests;
+#[path = "floating_tests.rs"]
+mod floating_tests;
 #[path = "font_settings_tests.rs"]
 mod font_settings_tests;
 #[path = "header_fading_tests.rs"]

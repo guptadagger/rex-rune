@@ -2,8 +2,9 @@
 use super::splits::SplitWay;
 use super::tabs::{TabAction, TabTarget};
 use super::theme::{MONITOR, SERVER};
-use super::workspace::Workspace;
+use super::workspace::{HostId, Workspace};
 use rex_rune::{
+    layers,
     settings::{ChromeTheme, TerminalThemeChoice},
     terminal_theme::{BUILTIN_PREFIX, BUILTINS, paired},
 };
@@ -32,6 +33,11 @@ pub enum Intent {
     DownloadFolder,
     InsertPath(usize),
     Pane(PaneTarget, PaneAction),
+    /// A floating-layer verb on the layer its target captured.
+    Layer(LayerTarget, LayerAction),
+    /// The floating-layer verbs for a captured pane: the row marked with a chevron in the
+    /// pane menu.
+    LayerMenu(PaneTarget),
     Session(SessionTarget, SessionAction),
     /// A tab action on a named tab of any host and session.
     Window(TabTarget, TabAction),
@@ -124,6 +130,7 @@ impl Intent {
                 PaneAction::Reset => ("pane.reset", Value::Null),
                 PaneAction::Rename => ("pane.rename", Value::Null),
             },
+            Self::Layer(_, action) => (action.name(), Value::Null),
             _ => return None,
         })
     }
@@ -152,6 +159,7 @@ impl Intent {
                     _
                 )
                 | Intent::MovePaneTo(_)
+                | Intent::LayerMenu(_)
                 | Intent::ChooseHost(_)
                 | Intent::HostShell(_)
                 | Intent::DownloadFolder
@@ -214,6 +222,64 @@ pub struct PaneTarget {
     /// What the pane is called on screen (`activity::pane_name`).
     pub name: String,
     pub tab: String,
+}
+
+/// A floating layer captured from the server's view: the host, connection, session, tab and
+/// layer it belonged to, the pane the action names, and every pane in it. A request re-checks
+/// all of them, so a layer that changed is reported rather than retargeted.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LayerTarget {
+    pub host: usize,
+    pub host_id: HostId,
+    pub epoch: u64,
+    pub session: String,
+    pub window: String,
+    pub layer: String,
+    /// The pane an action names: the focused pane, the menu's pane, or the layer's first block.
+    pub block: String,
+    /// Every block in the layer, in layout order, when it was captured.
+    pub panes: Vec<String>,
+    /// Those panes' screen names, in the same order.
+    pub pane_names: Vec<String>,
+    /// What the layer is called on screen: its first pane, and `+N` for the rest.
+    pub name: String,
+    /// Whether the view says this layer floats (an unknown kind floats too).
+    pub floating: bool,
+    pub minimized: bool,
+}
+
+/// What a layer row or verb does to the layer its target names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LayerAction {
+    /// `session.float_block`: this pane into a new floating layer of its own window.
+    Float,
+    /// `session.new_layer`: one new pane in a new floating layer of the tab on screen.
+    NewFloating,
+    /// `session.set_layer_state` with `minimized`.
+    Minimize,
+    /// `session.set_layer_state` with `normal` and `focus`: restore and raise in one revision.
+    Focus,
+    /// `session.raise_layer`: bring to front, leaving focus and bounds alone.
+    Raise,
+    /// `session.move_block`: this pane beside the tab's first tiled pane.
+    ReturnToTiles,
+    /// `session.close_layer`: every pane in the layer, after confirmation.
+    Close,
+}
+
+impl LayerAction {
+    /// The registered client action that runs this verb, for the row's shortcut hint.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Float => "pane.float",
+            Self::NewFloating => "pane.new_floating",
+            Self::Minimize => "pane.minimize_layer",
+            Self::Focus => "pane.restore_layer",
+            Self::Raise => "pane.raise_layer",
+            Self::ReturnToTiles => "pane.return_to_tiles",
+            Self::Close => "pane.close_layer",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -334,6 +400,9 @@ pub enum PanelKind {
     SwitchHost,
     MovePane,
     Pane,
+    /// The floating-layer verbs for the pane the panel's `target` names, opened from the
+    /// pane menu's one Floating layer row.
+    Layer,
     Session,
     /// A sidebar host header's right-click menu.
     Host(usize),
@@ -394,6 +463,8 @@ pub struct Panel {
     pub error: Option<String>,
     pub target: Option<PaneTarget>,
     pub session: Option<SessionTarget>,
+    /// The floating layer a layer verb, its confirmation, acts on.
+    pub layer: Option<LayerTarget>,
     /// The tab a tab menu, its rename form or its close confirmations act on.
     pub tab: Option<TabTarget>,
     pub back: Option<Box<Panel>>,
@@ -430,6 +501,7 @@ impl Panel {
             error: None,
             target: None,
             session: None,
+            layer: None,
             tab: None,
             back: None,
             anchor: None,
@@ -446,6 +518,7 @@ impl Panel {
                 | PanelKind::Activity
                 | PanelKind::Hosts(_)
                 | PanelKind::Pane
+                | PanelKind::Layer
                 | PanelKind::Session
                 | PanelKind::Host(_)
                 | PanelKind::Window
@@ -835,6 +908,53 @@ impl Workspace {
             }
             return entries;
         }
+        // The floating-layer menu: one verb per row, for the pane it was opened on. A verb
+        // that cannot run now says why in its hint column.
+        if matches!(panel.kind, PanelKind::Layer) {
+            let Some(target) = panel
+                .target
+                .clone()
+                .or_else(|| self.focused_block().and_then(|b| self.target(&b)))
+            else {
+                return Vec::new();
+            };
+            let Some(layer) = self.layer_target(&target) else {
+                return Vec::new();
+            };
+            let mut entries = Vec::new();
+            let mut rows: Vec<(&str, u8, LayerAction)> = Vec::new();
+            if !layer.floating {
+                rows.push(("Float pane", 0, LayerAction::Float));
+            }
+            rows.push(("New floating pane", 0, LayerAction::NewFloating));
+            if layer.floating {
+                rows.extend([
+                    ("Minimize layer", 1, LayerAction::Minimize),
+                    (
+                        if layer.minimized {
+                            "Restore layer"
+                        } else {
+                            "Focus layer"
+                        },
+                        1,
+                        LayerAction::Focus,
+                    ),
+                    ("Bring layer to front", 1, LayerAction::Raise),
+                    ("Return pane to tiles", 2, LayerAction::ReturnToTiles),
+                    ("Close floating layer…", 3, LayerAction::Close),
+                ]);
+            }
+            for (label, section, action) in rows {
+                let blocked = self.layer_blocked(Some(&layer), action);
+                let mut entry = Entry::new(label, "", "", Intent::Layer(layer.clone(), action))
+                    .in_section(section);
+                entry.danger = matches!(action, LayerAction::Close);
+                entry.enabled = blocked.is_none();
+                entry.detail = blocked.map(layers::Blocked::hint).unwrap_or_default();
+                entries.push(entry);
+            }
+            return entries;
+        }
         let sessions_only = matches!(panel.kind, PanelKind::Picker(true));
         let pane_only = matches!(panel.kind, PanelKind::Pane);
         if !matches!(panel.kind, PanelKind::Picker(_) | PanelKind::Pane) {
@@ -887,6 +1007,22 @@ impl Workspace {
                 entry.danger = matches!(action, PaneAction::Close);
                 entry.enabled = self.pane_verb_available(&target, action);
                 entries.push(entry);
+            }
+            // Floating layers have their own small menu: six more rows here pushed the
+            // destructive close below the fold at 640×480 (see floating_pane_menu draws).
+            // A host before API revision 13 has no floating layers, and Commands carries
+            // that reason, so this menu stays exactly as it was there.
+            if self.layer_gate().is_none() && self.layer_target(&target).is_some() {
+                let mut entry =
+                    Entry::new("Floating layer…", "", "", Intent::LayerMenu(target.clone()))
+                        .in_section(1);
+                entry.followup = true;
+                // Above the menu's destructive rows, which stay last.
+                let at = entries
+                    .iter()
+                    .position(|e| e.danger)
+                    .unwrap_or(entries.len());
+                entries.insert(at, entry);
             }
         }
         // A typed switcher query names a new session wherever it is created.
@@ -1044,8 +1180,9 @@ impl Workspace {
             };
             if let Some((name, args)) = shortcut {
                 let keys = self.shortcut_chords(name, &args);
-                // A pointer hint (Mouse Back) stays until the action is given a key.
-                if keys.is_empty() && entry.detail.starts_with("Mouse ") {
+                // An unbound action leaves the row's own words alone: a pointer hint (Mouse
+                // Back) or the reason the row cannot run now.
+                if keys.is_empty() {
                     continue;
                 }
                 entry.detail = super::keycaps::spell(&keys);

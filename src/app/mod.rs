@@ -13,6 +13,7 @@ mod discover;
 mod downloads;
 mod downloads_view;
 mod find;
+mod floating;
 mod font_page;
 mod font_picker;
 mod font_size;

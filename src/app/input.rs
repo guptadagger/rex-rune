@@ -251,7 +251,7 @@ pub fn list_key(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx) -> bool {
             && space(ev, tx)
             && s.panel
                 .as_ref()
-                .is_some_and(|p| matches!(p.kind, PanelKind::Pane)) =>
+                .is_some_and(|p| matches!(p.kind, PanelKind::Pane | PanelKind::Layer)) =>
         {
             s.close_panel(tx)
         }

@@ -835,7 +835,10 @@ fn target_block(s: &Workspace) -> Option<String> {
     let panel = s.panel.as_ref()?;
     matches!(
         panel.kind,
-        PanelKind::Pane | PanelKind::Form(Form::RenamePane(_)) | PanelKind::Confirm { .. }
+        PanelKind::Pane
+            | PanelKind::Layer
+            | PanelKind::Form(Form::RenamePane(_))
+            | PanelKind::Confirm { .. }
     )
     .then(|| panel.target.as_ref().map(|t| t.block.clone()))
     .flatten()
