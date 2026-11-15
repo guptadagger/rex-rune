@@ -5,7 +5,7 @@
 use super::*;
 use crate::app::{
     actions::{self, Remote},
-    panel::{LayerAction, PaneAction},
+    panel::{Entry, LayerAction, PaneAction},
 };
 use rex_rune::layers;
 use serde_json::{Value, json};
@@ -989,4 +989,374 @@ fn a_layer_verb_sends_only_its_own_request_and_leaves_the_terminal_alone() {
         ws.model().focused().map(str::to_owned),
         Some("block:a".into())
     );
+}
+
+/// The open list, and the position of the row the menu draws under `label`.
+fn find_row(ws: &Workspace, label: &str) -> (Vec<Entry>, usize) {
+    let entries = ws.entries();
+    let at = entries
+        .iter()
+        .position(|entry| entry.label == label)
+        .unwrap_or_else(|| {
+            panic!(
+                "no {label} row in {:?}",
+                entries.iter().map(|e| &e.label).collect::<Vec<_>>()
+            )
+        });
+    (entries, at)
+}
+
+/// F's layer menu, opened from F's own pane-menu row while the keyboard is elsewhere.
+fn open_layer_menu(ws: &mut Workspace, block: &str) {
+    ws.pane_menu(block.into(), None);
+    let (entries, at) = find_row(ws, "Floating layer…");
+    ws.perform(entries[at].action.clone(), &mut tx());
+    assert!(matches!(
+        ws.panel.as_ref().map(|p| &p.kind),
+        Some(PanelKind::Layer)
+    ));
+}
+
+/// The one request a captured `New floating pane` row sends.
+fn new_floating_request(ws: &mut Workspace, rx: &flume::Receiver<HostCommand>) -> Value {
+    let (entries, at) = find_row(ws, "New floating pane");
+    ws.perform(entries[at].action.clone(), &mut tx());
+    let sent = requests(rx);
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(sent[0].0, "session.new_layer", "{sent:?}");
+    assert_eq!(sent[0].1, "s", "{sent:?}");
+    sent[0].2.clone()
+}
+
+#[test]
+fn a_captured_layer_menu_starts_its_new_pane_in_the_tab_and_folder_it_named() {
+    // The keyboard is on the tiled pane A; the menu was opened on the floating pane F. Their
+    // folders differ, so the request says which one it used.
+    let (mut ws, rx) = floating_workspace(
+        13,
+        vec![tiled(&["block:a"]), layer("floating", None, &["block:f"])],
+        "block:a",
+    );
+    open_layer_menu(&mut ws, "block:f");
+    let payload = new_floating_request(&mut ws, &rx);
+    assert_eq!(payload["cwd_from"], "block:f", "the menu's pane, not A's");
+    assert_eq!(payload["window_id"], "dev");
+    assert_eq!(payload["session_id"], "s");
+    assert!(payload["layout"]["block"]["flavor"].is_string());
+    assert_eq!(ws.hosts[0].model.views["s"].revision, 1);
+
+    // Another client shows the other tab while this menu is still open. The menu still names
+    // F's tab: the pane exists there, so the request goes there and nowhere else.
+    let (mut ws, rx) = floating_workspace(
+        13,
+        vec![tiled(&["block:a"]), layer("floating", None, &["block:f"])],
+        "block:a",
+    );
+    open_layer_menu(&mut ws, "block:f");
+    let view = ws.hosts[0].model.views.get_mut("s").unwrap();
+    view.active_window_id = Some("other".into());
+    view.windows[1].focused_block_id = Some("block:o".into());
+    let payload = new_floating_request(&mut ws, &rx);
+    assert_eq!(
+        payload["window_id"], "dev",
+        "the captured tab, not the one another client raised"
+    );
+    assert_eq!(payload["cwd_from"], "block:f");
+    assert_eq!(payload["session_id"], "s");
+
+    // The focused path is unchanged: Commands and its shortcut use the pane and tab on screen.
+    let (mut ws, rx) = floating_workspace(
+        13,
+        vec![tiled(&["block:a"]), layer("floating", None, &["block:f"])],
+        "block:a",
+    );
+    run(&mut ws, "pane.new_floating");
+    let sent = requests(&rx);
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(sent[0].2["window_id"], "dev");
+    assert_eq!(
+        sent[0].2["cwd_from"], "block:a",
+        "the focused pane's folder"
+    );
+}
+
+#[test]
+fn a_captured_new_floating_pane_refuses_an_epoch_pane_or_tab_that_is_gone() {
+    for change in ["epoch", "pane", "window"] {
+        let (mut ws, rx) = floating_workspace(
+            13,
+            vec![tiled(&["block:a"]), layer("floating", None, &["block:f"])],
+            "block:a",
+        );
+        open_layer_menu(&mut ws, "block:f");
+        let (entries, at) = find_row(&ws, "New floating pane");
+        let Intent::Layer(target, kind) = entries[at].action.clone() else {
+            panic!("not a layer row")
+        };
+        match change {
+            // A new connection: the captured view belongs to the old one.
+            "epoch" => {
+                ws.hosts[0].model.connection_epoch += 1;
+            }
+            // The pane the menu named left the view, so its folder cannot be read.
+            "pane" => {
+                ws.hosts[0].model.views.get_mut("s").unwrap().windows[0].layers[1]
+                    .blocks
+                    .clear();
+            }
+            // Its tab is gone altogether.
+            "window" => {
+                ws.hosts[0]
+                    .model
+                    .views
+                    .get_mut("s")
+                    .unwrap()
+                    .windows
+                    .remove(0);
+            }
+            _ => unreachable!(),
+        }
+        ws.perform(Intent::Layer(target, kind), &mut tx());
+        let sent = requests(&rx);
+        assert!(
+            sent.is_empty(),
+            "{change}: an invalidated menu must send nothing: {sent:?}"
+        );
+        assert!(
+            notices(&ws)
+                .iter()
+                .any(|n| n.contains("changed since it was listed")),
+            "{change}: {:?}",
+            notices(&ws)
+        );
+    }
+}
+
+/// The label of the row the keyboard is on, as the open list draws it.
+fn highlighted(rt: &Runtime<Workspace>) -> String {
+    let entries = rt.state.entries();
+    entries[rt.state.panel.as_ref().expect("an open list").selected]
+        .label
+        .clone()
+}
+
+/// Press Down until the keyboard is on `label`, as a person would.
+fn highlight(rt: &mut Runtime<Workspace>, label: &str) {
+    for _ in 0..rt.state.entries().len() {
+        if highlighted(rt) == label {
+            return;
+        }
+        press(rt, Key::Down);
+    }
+    panic!(
+        "never reached {label}; the keyboard is on {}",
+        highlighted(rt)
+    );
+}
+
+/// Another client raising `layer_id`: the order the view reports back to front afterwards.
+fn raised(ws: &mut Workspace, layer_id: &str) {
+    let window = &mut ws.hosts[0]
+        .model
+        .views
+        .get_mut("s")
+        .expect("a view")
+        .windows[0];
+    let at = window
+        .layers
+        .iter()
+        .position(|layer| layer.layer_id.as_deref() == Some(layer_id))
+        .expect("the layer");
+    let layer = window.layers.remove(at);
+    window.layers.push(layer);
+}
+
+/// The host wake that carries the workspace's view into the app, as a reply does.
+fn wake(ws: &mut Workspace) {
+    *ws.hosts[0].connection.model.lock().expect("the model") = ws.hosts[0].model.clone();
+    ws.sync(0, &mut tx());
+}
+
+/// Three floating layers, back to front, with the tiled pane A behind them.
+fn three_layers(focused: &str) -> (Workspace, flume::Receiver<HostCommand>) {
+    floating_workspace(
+        13,
+        vec![
+            tiled(&["block:a"]),
+            layer("alpha", None, &["block:alpha"]),
+            layer("beta", None, &["block:beta"]),
+            layer("gamma", None, &["block:gamma"]),
+        ],
+        focused,
+    )
+}
+
+#[test]
+fn a_layer_reorder_moves_the_keyboard_to_the_row_it_named_not_to_its_index() {
+    let (ws, rx) = three_layers("block:a");
+    let mut rt = runtime(ws);
+    rt.update(|s, _| s.picker(false));
+    highlight(&mut rt, "Show beta");
+    assert_eq!(highlighted(&rt), "Show beta");
+
+    // Another client raises alpha: [alpha, beta, gamma] becomes [beta, gamma, alpha], so the
+    // index the keyboard was on now names gamma.
+    rt.update(|s, _| raised(s, "alpha"));
+    rt.update(|s, _| wake(s));
+    assert_eq!(
+        highlighted(&rt),
+        "Show beta",
+        "the highlight follows its row, not its old index"
+    );
+    press(&mut rt, Key::Enter);
+    let sent = requests(&rx);
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(sent[0].0, "session.set_layer_state");
+    assert_eq!(
+        sent[0].2["layer_id"], "beta",
+        "Enter ran the row the keyboard named, never the one that took its place"
+    );
+    assert_eq!(sent[0].2["focus"], true);
+}
+
+#[test]
+fn a_removed_layer_row_runs_nothing_and_does_not_retarget_its_neighbour() {
+    // The selected layer disappears while the list is open: Enter sends nothing at all.
+    let (ws, rx) = three_layers("block:a");
+    let mut rt = runtime(ws);
+    rt.update(|s, _| s.picker(false));
+    highlight(&mut rt, "Show beta");
+    rt.update(|s, _| {
+        let window = &mut s.hosts[0].model.views.get_mut("s").unwrap().windows[0];
+        window
+            .layers
+            .retain(|l| l.layer_id.as_deref() != Some("beta"));
+    });
+    rt.update(|s, _| wake(s));
+    press(&mut rt, Key::Enter);
+    let sent = requests(&rx);
+    assert!(
+        sent.is_empty(),
+        "a removed row runs nothing at all: {sent:?}"
+    );
+    assert!(
+        rt.state
+            .notices
+            .iter()
+            .any(|n| n.text.contains("no longer in the list")),
+        "{:?}",
+        notices(&rt.state)
+    );
+
+    // A row that is not in the layer inventory keeps its own identity when one above it goes:
+    // the row that shifts into its index is a different command.
+    let (ws, rx) = three_layers("block:a");
+    let mut rt = runtime(ws);
+    rt.update(|s, _| s.picker(false));
+    highlight(&mut rt, "Focus next pane");
+    rt.update(|s, _| {
+        let window = &mut s.hosts[0].model.views.get_mut("s").unwrap().windows[0];
+        window
+            .layers
+            .retain(|l| l.layer_id.as_deref() != Some("alpha"));
+    });
+    rt.update(|s, _| wake(s));
+    assert_eq!(highlighted(&rt), "Focus next pane");
+    press(&mut rt, Key::Enter);
+    let sent = requests(&rx);
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(
+        sent[0].0, "session.focus_next_pane",
+        "the row that was named, not the one that moved into its index"
+    );
+}
+
+#[test]
+fn the_layer_menu_shows_each_bound_verbs_effective_shortcut_and_keeps_a_reason() {
+    let bind = |ws: &mut Workspace, value: Value| {
+        ws.settings.shortcut_file.overrides = rex_rune::keymap::Overrides::parse(&value);
+        ws.local_keymap = actions::resolve(&ws.settings.shortcut_file.overrides);
+        ws.keymap_generation += 1;
+    };
+    let (mut ws, _rx) = floating_workspace(
+        13,
+        vec![tiled(&["block:a"]), layer("floating", None, &["block:f"])],
+        "block:f",
+    );
+    open_layer_menu(&mut ws, "block:f");
+    // Unbound by default, as every layer verb is: the row keeps the words it has.
+    for label in [
+        "Minimize layer",
+        "Return pane to tiles",
+        "Close floating layer…",
+    ] {
+        let (entries, at) = find_row(&ws, label);
+        assert!(
+            entries[at].keys.is_empty(),
+            "{label} has a default key: {:?}",
+            entries[at].keys
+        );
+    }
+    assert_eq!(
+        find_row(&ws, "Minimize layer").0[find_row(&ws, "Minimize layer").1].detail,
+        ""
+    );
+
+    // Bound: the menu spells the same hint Commands spells.
+    bind(
+        &mut ws,
+        json!([{"keys":"ctrl+shift+m","action":"pane.minimize_layer"}]),
+    );
+    let (entries, at) = find_row(&ws, "Minimize layer");
+    assert_eq!(
+        entries[at].keys,
+        [vec!["Ctrl".to_owned(), "Shift".to_owned(), "M".to_owned()]]
+    );
+    assert_eq!(entries[at].detail, "Ctrl Shift M");
+    assert_eq!(
+        entries[at].detail,
+        command(&ws, "pane.minimize_layer").entry.detail,
+        "the menu and Commands share one formatter"
+    );
+    // The row still names the menu's own pane: formatting never retargets it.
+    match &entries[at].action {
+        Intent::Layer(target, LayerAction::Minimize) => assert_eq!(target.block, "block:f"),
+        other => panic!("{other:?}"),
+    }
+
+    // Rebound: the hint follows the binding.
+    bind(
+        &mut ws,
+        json!([{"keys":"ctrl+alt+m","action":"pane.minimize_layer"}]),
+    );
+    let (entries, at) = find_row(&ws, "Minimize layer");
+    assert_eq!(
+        entries[at].keys,
+        [vec!["Ctrl".to_owned(), "Alt".to_owned(), "M".to_owned()]]
+    );
+
+    // Removed again: an unbound row keeps the reason it shows, and a bound one shows the key
+    // instead, exactly as its Commands row does.
+    bind(&mut ws, json!([]));
+    let (entries, at) = find_row(&ws, "Minimize layer");
+    assert!(entries[at].keys.is_empty());
+    ws.hosts[0].model.views.get_mut("s").unwrap().windows[0].layers = vec![
+        serde_json::from_value(tiled(&[])).unwrap(),
+        serde_json::from_value(layer("floating", None, &["block:f"])).unwrap(),
+    ];
+    let (entries, at) = find_row(&ws, "Return pane to tiles");
+    assert!(!entries[at].enabled, "still no tiled pane");
+    assert_eq!(entries[at].detail, layers::Blocked::NoAnchor.hint());
+    bind(
+        &mut ws,
+        json!([{"keys":"ctrl+shift+r","action":"pane.return_to_tiles"}]),
+    );
+    let (entries, at) = find_row(&ws, "Return pane to tiles");
+    assert_eq!(
+        entries[at].keys,
+        [vec!["Ctrl".to_owned(), "Shift".to_owned(), "R".to_owned()]]
+    );
+    bind(&mut ws, json!([]));
+    let (entries, at) = find_row(&ws, "Return pane to tiles");
+    assert_eq!(entries[at].detail, layers::Blocked::NoAnchor.hint());
 }

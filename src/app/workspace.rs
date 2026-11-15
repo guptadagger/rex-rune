@@ -665,6 +665,7 @@ impl Workspace {
         self.ring_bells(index, bells);
         self.track_activity(index);
         self.restore_activity_selection(activity_selection);
+        self.restore_row_selection();
         self.deliver_program_notices(index, notices);
         if self
             .panel
@@ -2103,16 +2104,60 @@ impl Workspace {
 
     pub fn navigate_panel(&mut self, delta: isize) {
         let entries = self.entries();
-        if let Some(panel) = &mut self.panel {
-            let mut selected = panel.selected as isize + delta;
-            while selected >= 0 && (selected as usize) < entries.len() {
-                if entries[selected as usize].enabled {
-                    panel.selected = selected as usize;
-                    panel.reveal = true;
-                    break;
-                }
-                selected += delta.signum();
+        let Some(mut selected) = self.panel.as_ref().map(|p| p.selected as isize + delta) else {
+            return;
+        };
+        while selected >= 0 && (selected as usize) < entries.len() {
+            if entries[selected as usize].enabled {
+                self.select_row(selected as usize);
+                break;
             }
+            selected += delta.signum();
+        }
+    }
+
+    /// Point the keyboard at entry `index` and remember which row that is: a host wake that
+    /// reorders the list keeps the highlight on this row instead of on whatever moved into its
+    /// place (`restore_row_selection`), and Enter runs it (`submit`). Only the paths that move
+    /// the keyboard record it; a row chosen some other way is acted on where it is.
+    pub fn select_row(&mut self, index: usize) {
+        let row = self
+            .entries()
+            .get(index)
+            .and_then(|entry| entry.id.as_deref().map(str::to_owned));
+        if let Some(panel) = self.panel.as_mut() {
+            panel.reveal |= index != panel.selected;
+            panel.row = row.map(|row| (index, row));
+            panel.selected = index;
+        }
+    }
+
+    /// Keep the keyboard's row while a host wake rebuilds the list it points at: the row the
+    /// keyboard left its highlight on is followed to its new position, and one that is gone
+    /// leaves the highlight alone and runs nothing (`submit`). A selection made some other way
+    /// — a pointer hover, a row with no identity — is left exactly as it was.
+    pub fn restore_row_selection(&mut self) {
+        let Some(panel) = self.panel.as_ref() else {
+            return;
+        };
+        let selected = panel.selected;
+        let Some((index, row)) = panel.row.clone() else {
+            return;
+        };
+        if index != selected {
+            return;
+        }
+        let entries = self.entries();
+        // Found: follow the row. Gone: the highlight stays where it is and this row is never
+        // retargeted, so `submit` refuses it until the keyboard picks another row.
+        if let Some(found) = entries
+            .iter()
+            .position(|entry| entry.id.as_deref() == Some(row.as_str()))
+        {
+            let panel = self.panel.as_mut().unwrap();
+            panel.reveal |= found != panel.selected;
+            panel.selected = found;
+            panel.row = Some((found, row));
         }
     }
 
@@ -2135,8 +2180,10 @@ impl Workspace {
         }
         let first = self.entries().iter().position(|e| e.enabled).unwrap_or(0);
         if let Some(panel) = &mut self.panel {
-            panel.selected = first;
             panel.error = None;
+        }
+        self.select_row(first);
+        if let Some(panel) = &mut self.panel {
             panel.reveal = true;
         }
     }
@@ -2151,13 +2198,24 @@ impl Workspace {
             .collect();
         if panel.is_list() {
             let selected = panel.selected;
-            if let Some(entry) = self
-                .entries()
-                .into_iter()
-                .nth(selected)
-                .filter(|e| e.enabled)
-            {
-                self.perform(entry.action, tx);
+            let row = panel.row.clone();
+            let entries = self.entries();
+            // A row with an identity runs by it: a list the server reordered under the
+            // keyboard must not hand Enter the row that took its place. A row that is no
+            // longer listed runs nothing.
+            let index = match &row {
+                Some((index, row)) if *index == selected => entries
+                    .iter()
+                    .position(|entry| entry.id.as_deref() == Some(row.as_str())),
+                _ => Some(selected),
+            };
+            let Some(index) = index else {
+                self.inform("That row is no longer in the list. Nothing was changed.");
+                return;
+            };
+            if let Some(entry) = entries.get(index).filter(|e| e.enabled) {
+                let action = entry.action.clone();
+                self.perform(action, tx);
             }
             return;
         }

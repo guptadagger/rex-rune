@@ -14,41 +14,43 @@ Proves, with real native input through the built client:
   * `Close floating layer…` defaults to Keep running, and confirming closes every pane of that
     layer only.
 
-Everything is disposable: a private unix socket under a run root this script creates, a private
-HOME/XDG/TMPDIR, and its own Xvfb. REX_BIN names the client (default target/release/rex-rune).
-REX_FLOAT_OUT names where redacted receipts are kept; the run root itself is removed.
+Everything is disposable and owned by this run: a private unix socket under a run root this
+script creates, a private HOME/XDG/TMPDIR, and its own Xvfb. REX_BIN names the client (default
+target/release/rex-rune). Every receipt of a run goes to its own new directory under
+REX_FLOAT_OUT (default ~/.cache/agent-ws/issue136-slice1-receipts): a later run never overwrites
+an earlier one's, and `identity.json` there records the client commit and whether the tree was
+dirty, this client binary's SHA-256, the server's version, API revision and binary hash, and the
+commands that were run. The run root is removed on every exit, including a missing tool, a
+failed check and a failed receipt copy; every process this run starts is terminated and waited
+for before those files go away.
 """
-import importlib.util, json, os, shutil, subprocess, sys, tempfile, time
+import hashlib, importlib.util, json, os, shutil, subprocess, sys, tempfile, time
 from pathlib import Path
 
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = os.environ.get("REX_BIN", str(ROOT / "target/release/rex-rune"))
-RECEIPTS = Path(os.environ.get("REX_FLOAT_OUT", str(Path.home() / ".cache/agent-ws/issue136-slice1-receipts")))
-RECEIPTS.mkdir(parents=True, exist_ok=True)
+RECEIPTS_ROOT = Path(os.environ.get("REX_FLOAT_OUT", str(Path.home() / ".cache/agent-ws/issue136-slice1-receipts")))
 BASE = Path.home() / ".cache/agent-ws"
-BASE.mkdir(parents=True, exist_ok=True)
-work = Path(tempfile.mkdtemp(prefix="issue136-float-", dir=BASE))
-for name in ("home", "home-b", "config", "config-b", "state", "state-b", "runtime", "cache", "captures", "tmp"):
-    (work / name).mkdir(mode=0o700)
-for name in list(os.environ):
-    if name.startswith(("REX_", "HERDR_")) or name in ("DISPLAY", "WAYLAND_DISPLAY", "DBUS_SESSION_BUS_ADDRESS"):
-        del os.environ[name]
-endpoint = "unix://" + str(work / "rex.sock")
-os.environ.update(
-    HOME=str(work / "home"), XDG_CONFIG_HOME=str(work / "config"),
-    XDG_STATE_HOME=str(work / "state"), XDG_RUNTIME_DIR=str(work / "runtime"),
-    XDG_CACHE_HOME=str(work / "cache"), TMPDIR=str(work / "tmp"),
-    REX_SERVER=endpoint, REX_CAPTURE_OUT=str(work / "captures"), REX_BIN=BINARY,
-)
-tempfile.tempdir = str(work / "tmp")
-for tool in ("rex", "Xvfb", "openbox", "xdotool", "import", "tesseract"):
-    assert shutil.which(tool), f"{tool} is required"
 
-spec = importlib.util.spec_from_file_location("accept", ROOT / "scripts/rune-acceptance-x11.py")
-accept = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(accept)
-accept.OUT = work / "captures"
+
+def sha256(path):
+    """The SHA-256 of a file, or None when this run cannot read it."""
+    try:
+        digest = hashlib.sha256()
+        with open(path, "rb") as handle:
+            for block in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(block)
+        return digest.hexdigest()
+    except OSError:
+        return None
+
+
+def git(*args):
+    """One read-only git answer about this checkout, or empty when it has none."""
+    result = subprocess.run(["git", "-C", str(ROOT), *args], capture_output=True, text=True)
+    return result.stdout.strip() if result.returncode == 0 else ""
+
 SHELL = {"block": {"flavor": "com.superlogical.terminal.shell"}}
 SPLIT = {"split": {"direction": "horizontal", "ratio": 0.5, "before": SHELL, "after": SHELL}}
 REQUESTED = [0.15, 0.12, 0.7, 0.7]
@@ -151,15 +153,68 @@ def config(path, sid):
 
 desk = None
 server = None
+work = None
+receipts = None
 results = {"endpoint_kind": "private unix socket under the run root", "checks": checks}
 try:
+    # This run's own receipts: a directory only this run could have made, so a later run never
+    # overwrites these files.
+    RECEIPTS_ROOT.mkdir(parents=True, exist_ok=True)
+    receipts = Path(tempfile.mkdtemp(prefix=time.strftime("%Y%m%dT%H%M%S-"), dir=RECEIPTS_ROOT))
+    BASE.mkdir(parents=True, exist_ok=True)
+    # The run root, and the private HOME/XDG/TMPDIR under it, exist only inside this envelope:
+    # the `finally` below removes them whatever happens next, a missing tool included.
+    work = Path(tempfile.mkdtemp(prefix="issue136-float-", dir=BASE))
+    for name in ("home", "home-b", "config", "config-b", "state", "state-b", "runtime", "cache",
+                 "captures", "tmp"):
+        (work / name).mkdir(mode=0o700)
+    # Nothing of the caller's desktop, bus, agent or audio may reach this private session.
+    for name in list(os.environ):
+        if name.startswith(("REX_", "HERDR_", "SSH_", "PULSE_", "PIPEWIRE_", "JACK_", "WIREPLUMBER_",
+                            "ALSA_", "SDL_AUDIODRIVER", "GST_")) or name in (
+                "DISPLAY", "WAYLAND_DISPLAY", "DBUS_SESSION_BUS_ADDRESS", "XAUTHORITY",
+                "XAUTHORIZATION", "PULSE_COOKIE"):
+            del os.environ[name]
+    endpoint = "unix://" + str(work / "rex.sock")
+    os.environ.update(
+        HOME=str(work / "home"), XDG_CONFIG_HOME=str(work / "config"),
+        XDG_STATE_HOME=str(work / "state"), XDG_RUNTIME_DIR=str(work / "runtime"),
+        XDG_CACHE_HOME=str(work / "cache"), TMPDIR=str(work / "tmp"),
+        REX_SERVER=endpoint, REX_CAPTURE_OUT=str(work / "captures"), REX_BIN=BINARY,
+    )
+    tempfile.tempdir = str(work / "tmp")
+    for tool in ("rex", "Xvfb", "openbox", "xdotool", "import", "magick", "tesseract"):
+        assert shutil.which(tool), f"{tool} is required"
+    assert Path(BINARY).is_file(), f"{BINARY} is required"
+    spec = importlib.util.spec_from_file_location("accept", ROOT / "scripts/rune-acceptance-x11.py")
+    accept = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(accept)
+    accept.OUT = work / "captures"
+
+    results["identity"] = {
+        "client_source": str(ROOT),
+        "client_commit": git("rev-parse", "HEAD"),
+        "client_branch": git("rev-parse", "--abbrev-ref", "HEAD"),
+        "client_status": git("status", "--porcelain").splitlines(),
+        "client_binary": BINARY,
+        "client_binary_sha256": sha256(BINARY),
+        "rex_binary": shutil.which("rex"),
+        "rex_binary_sha256": sha256(shutil.which("rex") or ""),
+        "server_command": ["rex", "server", "run", "--listen", endpoint, "--restore=false",
+                           "--config", "/dev/null", "--state-dir", str(work / "rex-state")],
+        "client_command": [BINARY, "--session", "<session>", "--config", "<workspace.json>",
+                           "--window-size", "1024x700"],
+        "client_launcher": "scripts/rune-acceptance-x11.py Desktop.launch",
+    }
+
     server = subprocess.Popen(
-        ["rex", "server", "run", "--listen", endpoint, "--restore=false",
-         "--config", "/dev/null", "--state-dir", str(work / "rex-state")],
+        results["identity"]["server_command"],
         stdout=(work / "server.log").open("w"), stderr=subprocess.STDOUT)
     wait(lambda: (work / "rex.sock").exists(), "private Rex did not start")
     wait(lambda: accept.api("server.version").get("api_revision") == 13, "private Rex is not API 13")
     results["server"] = accept.api("server.version")
+    results["server"]["binary"] = results["identity"]["rex_binary"]
+    results["server"]["binary_sha256"] = results["identity"]["rex_binary_sha256"]
 
     sid = accept.api("session.create", label="floating-acceptance",
                      initial_windows=[{"window_label": "alpha", "layout": SPLIT}])["session_id"]
@@ -215,10 +270,17 @@ try:
     results["after_float_text"] = after[-800:]
     check("the same program and scrollback survive the float",
           pid_line in after and "marker-before" in after)
-    desk.type("echo marker-after")
+    desk.type("echo marker-after; echo shell-pid-after=$$")
     desk.key("Return")
-    after_input = wait(lambda: "marker-after" in text(alpha) and text(alpha), "typing after the float did not arrive")
+    after_input = wait(lambda: "marker-after" in text(alpha) and "shell-pid-after=" in text(alpha) and text(alpha),
+                       "typing after the float did not arrive")
     check("input still reaches the same terminal after floating", "marker-after" in after_input)
+    # Asked again after the float, so the shell's identity is this run's fresh answer and not
+    # the line printed before it moved.
+    pid_after = next((line for line in after_input.splitlines() if line.startswith("shell-pid-after=")), "")
+    check("the floated pane is the same shell process, asked again after the float",
+          pid_after.split("=", 1)[-1] == pid_line.split("=", 1)[-1] and bool(pid_after), pid_after)
+    results["after_float_pid"] = pid_after
     words = ocr(desk, window_b, "client-b-floating")
     results["client_b_words"] = words
     check("the second client renders the same floating pane", "marker-before" in words or "shell-pid" in words, words[:400])
@@ -372,31 +434,71 @@ try:
     results["no_anchor"] = {"view": v14, "revision_before": revision}
     check("and confirms nothing", v14["revision"] == revision and gamma in [b["block_id"] for l in floating_layers(v14) for b in l["blocks"]])
 
+    # A two-pane layer another client made, closed from this client: the confirmation names
+    # both panes and both end, while the other floating layer is untouched.
+    accept.api("session.new_split", session_id=sid, anchor_id=gamma, direction="horizontal",
+               side="after", layout=SHELL, focus=False)
+    v15 = wait(lambda: len(layer_of_block(view(), gamma)["blocks"]) == 2 and view(),
+               "the split did not join gamma's layer")
+    joined = layer_of_block(v15, gamma)
+    extra = next(b["block_id"] for b in joined["blocks"] if b["block_id"] != gamma)
+    accept.api("session.set_block_label", session_id=sid, block_id=extra, label="delta")
+    results["two_pane"] = {"layer_id": joined["layer_id"], "blocks": [b["block_id"] for b in joined["blocks"]]}
+    accept.api("session.focus_block", session_id=sid, block_id=gamma)
+    wait(lambda: window_of(view()).get("focused_block_id") == gamma, "gamma did not focus")
+    time.sleep(0.6)
+    command(desk, "close floating layer")
+    time.sleep(0.6)
+    words = ocr(desk, window_a, "client-a-close-two-panes")
+    results["two_pane_words"] = words
+    check("a two-pane layer is named pane by pane before it closes",
+          "gamma" in words and "delta" in words, words[:800])
+    desk.key("Tab")
+    desk.key("Return")
+    v16 = wait(lambda: extra not in blocks(view()) and gamma not in blocks(view()) and view(),
+               "the two-pane layer did not close")
+    results["two_pane_closed"] = {"view": v16}
+    check("closing the two-pane layer ends both of its panes and keeps the other layer",
+          alpha in blocks(v16)
+          and not any(extra in [b["block_id"] for b in l["blocks"]] for l in floating_layers(v16))
+          and not any(gamma in [b["block_id"] for b in l["blocks"]] for l in floating_layers(v16)))
+
     results["ok"] = True
 finally:
+    # Every process this run started ends, and is waited for, before its files are removed:
+    # the desktop's clients, its openbox and its Xvfb, then the private server.
+    teardown = []
     if desk is not None:
         try:
             desk.close()
         except Exception as error:
-            print("desktop cleanup:", error, flush=True)
+            teardown.append(f"desktop: {error}")
     if server is not None:
-        server.terminate()
         try:
-            server.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            server.kill()
-            server.wait(timeout=10)
-    (work / "checks.json").write_text(json.dumps(results, indent=2))
-    # Keep the redacted receipts, then remove only this run's own root.
-    for name in ("checks.json", "server.log", "client-a.log", "client-b.log"):
-        source = work / name
-        if source.exists():
-            (RECEIPTS / name).write_bytes(source.read_bytes())
-    captures = work / "captures"
-    if captures.is_dir():
-        for image in captures.iterdir():
-            (RECEIPTS / image.name).write_bytes(image.read_bytes())
-    shutil.rmtree(work, ignore_errors=True)
-    print("receipts:", RECEIPTS, flush=True)
+            accept.stop_owned(server)
+        except Exception as error:
+            teardown.append(f"server: {error}")
+    results["teardown"] = teardown
+    if work is not None:
+        try:
+            (work / "checks.json").write_text(json.dumps(results, indent=2))
+            (work / "identity.json").write_text(json.dumps(results.get("identity", {}), indent=2))
+            # Keep this run's own redacted receipts under its own directory. A copy that fails
+            # is reported and never stops the removal below.
+            if receipts is not None:
+                for source in [work / "checks.json", work / "identity.json", work / "server.log",
+                               work / "client-a.log", work / "client-b.log"]:
+                    if source.exists():
+                        (receipts / source.name).write_bytes(source.read_bytes())
+                captures = work / "captures"
+                if captures.is_dir():
+                    for image in captures.iterdir():
+                        (receipts / image.name).write_bytes(image.read_bytes())
+        except Exception as error:
+            teardown.append(f"receipts: {error}")
+            print("receipt copy:", error, flush=True)
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+    print("receipts:", receipts, flush=True)
 print("FAILED" if not results.get("ok") else "ALL PASS", flush=True)
 sys.exit(0 if results.get("ok") else 1)

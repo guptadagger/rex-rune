@@ -74,12 +74,12 @@ impl Blocked {
             }
             Self::LastVisible => {
                 "This layer holds the tab's only visible panes, and Rex keeps a tab's panes \
-                 visible. Minimize another layer first."
+                 visible. Restore another layer or open another visible pane first."
                     .into()
             }
             Self::NoAnchor => {
-                "This tab has no tiled pane to return beside. Split the tab to make one, then \
-                 return this pane."
+                "This tab has no tiled pane to return beside, and this client returns a pane \
+                 only beside a tiled one."
                     .into()
             }
             Self::InFront => "This layer is already in front.".into(),

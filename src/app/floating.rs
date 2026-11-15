@@ -130,15 +130,23 @@ impl Workspace {
         if let Some(gate) = self.layer_gate() {
             return Some(gate);
         }
-        if action == LayerAction::NewFloating {
-            return self.new_floating_blocked();
-        }
         let Some(target) = target else {
-            return Some(layers::Blocked::NoPane);
+            return match action {
+                LayerAction::NewFloating => self.new_floating_blocked(),
+                _ => Some(layers::Blocked::NoPane),
+            };
         };
         let Some(window) = self.layer_window(target) else {
             return Some(layers::Blocked::Stale);
         };
+        // `New floating pane` from a captured menu starts its pane in that menu's tab and
+        // folder, not the ones on screen now, so only that pane still has to be there: another
+        // client may have changed which tab is active without invalidating the menu.
+        if action == LayerAction::NewFloating {
+            return layers::layer_of(window, &target.block)
+                .is_none()
+                .then_some(layers::Blocked::Stale);
+        }
         let Some(layer) = window
             .layers
             .iter()
@@ -241,7 +249,13 @@ impl Workspace {
             return;
         }
         match action {
-            LayerAction::NewFloating => self.new_floating_pane(),
+            // The menu's own tab, session and folder, never the ones on screen now.
+            LayerAction::NewFloating => self.new_floating_layer(
+                target.host,
+                &target.session,
+                &target.window,
+                Some(&target.block),
+            ),
             LayerAction::Float => self.layer_request(
                 &target,
                 "session.float_block",
@@ -350,21 +364,22 @@ impl Workspace {
             self.inform(layers::Blocked::NoTab.sentence());
             return;
         };
-        let layout = self.new_terminal(self.active);
+        let from = self.focused_block();
+        self.new_floating_layer(self.active, &session, &window_id, from.as_deref());
+    }
+
+    /// One new terminal in a new floating layer of `window` on `host`, in the folder of the
+    /// pane `from` names. Every caller passes a context it captured, so a wake or another
+    /// client's tab switch between the choice and the request cannot move it.
+    fn new_floating_layer(&mut self, host: usize, session: &str, window: &str, from: Option<&str>) {
+        let layout = self.new_terminal(host);
         let payload = json!({
-            "window_id": window_id,
+            "window_id": window,
             "bounds": layers::REQUESTED_BOUNDS,
             "layout": layout,
             "focus": true,
         });
-        let from = self.focused_block();
-        self.open_terminal(
-            self.active,
-            "session.new_layer",
-            payload,
-            &session,
-            from.as_deref(),
-        );
+        self.open_terminal(host, "session.new_layer", payload, session, from);
     }
 }
 

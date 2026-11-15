@@ -454,6 +454,10 @@ pub struct Panel {
     /// (label, placeholder) for each input.
     pub fields: Vec<(String, String)>,
     pub selected: usize,
+    /// The row the keyboard points at, while it has an identity of its own (`Entry::id`) and
+    /// `selected` is still where the keyboard left it: a rebuilt list keeps the selection on
+    /// that row, and Enter runs it, whatever position it now has.
+    pub row: Option<(usize, String)>,
     /// Scroll the keyboard selection into view on the next commit.
     pub reveal: bool,
     /// Activity-only local redraw deadline, discarded with the popup.
@@ -494,6 +498,7 @@ impl Panel {
                 .map(|(l, p, _)| ((*l).into(), (*p).into()))
                 .collect(),
             selected: 0,
+            row: None,
             reveal: false,
             activity_refresh: None,
             server_refresh: None,
@@ -535,6 +540,9 @@ impl Panel {
 
 pub struct Entry {
     pub activity: Option<super::activity_list::Presentation>,
+    /// The row's own identity across a rebuild, where the list has one (`Command.id`): a
+    /// host wake that reorders the list finds the same row by this, not by its position.
+    pub id: Option<std::borrow::Cow<'static, str>>,
     pub label: String,
     pub detail: String,
     pub action: Intent,
@@ -573,6 +581,7 @@ impl Entry {
     ) -> Self {
         Self {
             activity: None,
+            id: None,
             label: label.into(),
             detail: detail.into(),
             group: group.into(),
@@ -953,6 +962,9 @@ impl Workspace {
                 entry.detail = blocked.map(layers::Blocked::hint).unwrap_or_default();
                 entries.push(entry);
             }
+            // The same effective-keymap hints Commands shows, through the one formatter: a row
+            // with no binding keeps the words it already has.
+            self.shortcut_details(&mut entries);
             return entries;
         }
         let sessions_only = matches!(panel.kind, PanelKind::Picker(true));

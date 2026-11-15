@@ -60,9 +60,14 @@ Some probes connect to the configured Rex server and create sessions there. Of t
     changed layer or connection is reported, never retargeted, and no state is applied ahead of
     the server. The pane menu has one `Floating layer…` row (a second small list;
     `panel::PanelKind::Layer`), Commands lists the verbs and this tab's floating layers by name
-    (including minimized ones), and nothing is bound by default. `floating_tests.rs` covers the
-    requests, refusals and the API 13 gate; real-font captures are `floating_*_draw` and run
-    individually with `REX_TEST_SNAP_DIR` (`REX_M136_MINIMUM`,
+    (including minimized ones), and nothing is bound by default; the second list goes through
+    the shared `shortcut_details` formatter like Commands. A row from the pane menu creates its
+    pane in the tab and folder that menu captured, never in the focused one, and every verb
+    validates the target's host ID, epoch, session, window and pane first. A keyboard-chosen
+    Commands row is run by its command ID (`Entry::id`, `Panel::row`), so a host wake that
+    reorders or shortens the list never hands Enter a different row. `floating_tests.rs` covers
+    the requests, refusals, both captured paths and the API 13 gate; real-font captures are
+    `floating_*_draw` and run individually with `REX_TEST_SNAP_DIR` (`REX_M136_MINIMUM`,
     `REX_M136_COMPACT`, `REX_M136_NO_TOOLBAR`). Shared geometry, focus/selection and terminal
     content never move locally. Pointer drag and edge resize are slice 2 and are not here. `font_size.rs`: terminal font size actions. `help.rs`: Rex help.
   - `input.rs`, `keys.rs`: workspace shortcuts first, then every other key to the focused pane's PTY; Rune key events to Rex `client.key` payloads; IME.

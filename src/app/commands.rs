@@ -1166,6 +1166,7 @@ impl Workspace {
                 .map(|mut command| {
                     (command.entry.group, command.entry.group_name) =
                         self.group_heading(command.group);
+                    command.entry.id = Some(command.id);
                     command.entry
                 })
                 .collect();
@@ -1175,6 +1176,7 @@ impl Workspace {
             .filter_map(|mut command| {
                 let rank = command.rank(&query)?;
                 command.entry.group = "Commands".into();
+                command.entry.id = Some(command.id);
                 Some((rank, command.entry))
             })
             .collect();
