@@ -483,7 +483,8 @@ fn changed_shortcuts_reach_offline_hosts_but_unchanged_touches_send_nothing() {
 
 #[test]
 fn shortcut_import_notice_uses_custom_config_filenames() {
-    let ws = workspace();
+    let mut ws = workspace();
+    ws.settings_path.set_file_name("custom-settings.json");
     std::fs::write(
         &ws.settings_path,
         r#"{"keybindings":[{"key":"ctrl+j","action":"client.tab.new"}]}"#,

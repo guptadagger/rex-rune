@@ -11,8 +11,9 @@ A test that writes files owns them, and nothing else's.
   proof that this run made it.
 - The folder is removed when its owner drops: on success, on a failed assertion and while the
   test unwinds. No test removes its files by hand for cleanup.
-- A window relaunched on the same settings path **borrows** the first window's folder and owns
-  none, so it cannot remove the file the first window is still using.
+- A window relaunched on the same settings path **borrows by test-helper convention**, not
+  a Rust lifetime: keep its owning window alive through use. If it must outlive that window,
+  use `relaunch_owning` to transfer the guard.
 - Never change `TMPDIR` (or any environment variable) inside a test: tests run in parallel in
   one process. Set it in the environment of the run, which every process and child inherits.
 - Nothing falls back to a shared `/tmp`: if the run's temporary directory is unusable, the
@@ -32,14 +33,18 @@ The suite writes only where the run sends it. A private run keeps every file out
 temporary directory and out of the real home:
 
 ```sh
-RUN="$HOME/.cache/agent-ws/rex-tests"
-mkdir -p "$RUN/tmp" "$RUN/home"
+mkdir -p "$HOME/.cache/agent-ws"
+RUN=$(mktemp -d "$HOME/.cache/agent-ws/rex-tests.XXXXXXXX")
+trap 'rm -rf -- "$RUN"' EXIT
+mkdir "$RUN/tmp" "$RUN/home"
 TMPDIR="$RUN/tmp" HOME="$RUN/home" cargo test --locked --all-features
 ```
 
 `TMPDIR` and `HOME` are set for the whole run, not per test: the test process and every child
 it starts inherit them, and the app's `~` display keeps its CI meaning (`TMPDIR` outside
-`HOME`). After a clean run, `"$RUN/tmp"` is empty again.
+`HOME`). After a clean run, `"$RUN/tmp"` is empty again; the shell's trap removes only the
+run directory it exclusively created. Stop and report disk or inode exhaustion instead of
+sweeping shared temporary directories or caches.
 
 ## What the tests prove
 
@@ -49,6 +54,11 @@ it starts inherit them, and the app's `~` display keeps its CI meaning (`TMPDIR`
 - A test that fails after making its folder still removes it.
 - A relaunched window leaves the first window's file alone, and the window that made the folder
   removes it when it drops.
+- Path-display checks require an exact fitting path, meaningful retained text at both ends of
+  a shortened path, and the dialog's exact full accessible folder identity. Known wrong paths
+  and generic `…downloads` labels are rejected without using the display producer as oracle.
+- The custom-settings import test explicitly supplies `custom-settings.json` inside its owned
+  folder, so hardcoding the default `workspace.json` notice is detected.
 
 ## Remaining gaps
 

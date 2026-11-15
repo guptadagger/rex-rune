@@ -108,26 +108,54 @@ fn shows(rt: &Runtime<Workspace>, needle: &str) -> bool {
     texts(rt).iter().any(|t| t.contains(needle))
 }
 
-/// `shown` is `dir` as a dialog or a notice writes it: the whole path when it fits, or cut in
-/// the middle, and then both ends are still the folder's own. A private temporary folder can
-/// be long enough to be cut on any platform, so a cut is not another folder.
-/// `a_deep_folder_...` covers the cut's shape itself.
-fn is_folder_display(shown: &str, dir: &Path) -> bool {
-    let full = dir.display().to_string();
+fn full_folder_display(dir: &Path) -> String {
     let home = std::env::var_os("HOME").map(PathBuf::from);
-    let relative = home
-        .as_deref()
-        .and_then(|home| full.strip_prefix(home.to_string_lossy().as_ref()))
-        .map(|rest| format!("~{rest}"));
-    [Some(full), relative]
-        .into_iter()
-        .flatten()
-        .any(|form| match shown.split_once('…') {
-            None => shown == form,
-            Some((head, tail)) => {
-                form.starts_with(head) && !tail.is_empty() && form.ends_with(tail)
-            }
-        })
+    match home.as_deref().and_then(|home| dir.strip_prefix(home).ok()) {
+        Some(rest) if rest.as_os_str().is_empty() => "~".into(),
+        Some(rest) => format!("~/{}", rest.display()),
+        None => dir.display().to_string(),
+    }
+}
+
+/// Fitting paths stay whole; longer ones keep meaningful text at both ends. The full
+/// accessible Save in label below independently identifies the folder even when cut.
+fn is_folder_display(shown: &str, dir: &Path) -> bool {
+    let full = full_folder_display(dir);
+    if full.chars().count() <= 36 {
+        return shown == full;
+    }
+    shown.split_once('…').is_some_and(|(head, tail)| {
+        !head.trim_matches('/').is_empty()
+            && !tail.trim_matches('/').is_empty()
+            && full.starts_with(head)
+            && full.ends_with(tail)
+            && shown.chars().count() <= 36
+    })
+}
+
+#[test]
+fn folder_display_rejects_generic_ellipsis_and_the_wrong_folder() {
+    let short = Path::new("/alpha/downloads");
+    assert!(is_folder_display("/alpha/downloads", short));
+    for wrong in [
+        "…downloads",
+        "/…downloads",
+        "/alpha/…downloads",
+        "/beta/downloads",
+    ] {
+        assert!(!is_folder_display(wrong, short), "{wrong}");
+    }
+    let deep = Path::new("/alpha/project/long-enough-output-path/build/downloads");
+    assert!(is_folder_display("/alpha/…/build/downloads", deep));
+    for wrong in [
+        "…downloads",
+        "/…downloads",
+        "/beta/…/build/downloads",
+        "/alpha/…/wrong-folder",
+        "/alpha/project/long-enough-output-path/build/downloads",
+    ] {
+        assert!(!is_folder_display(wrong, deep), "{wrong}");
+    }
 }
 
 /// `text` is `before`, `dir` as a line writes it, then `after`.
@@ -140,7 +168,10 @@ fn sentence(text: &str, before: &str, dir: &Path, after: &str) -> bool {
 /// The dialog's folder line names `dir`.
 fn folder_shown(rt: &Runtime<Workspace>, dir: &Path) -> bool {
     let line = element_text(rt, "save-in-folder").concat();
-    !line.is_empty() && is_folder_display(&line, dir)
+    !line.is_empty()
+        && is_folder_display(&line, dir)
+        && label_of(rt, "save-in")
+            == Some(("group", format!("Save in {}", full_folder_display(dir))))
 }
 
 fn label_of(rt: &Runtime<Workspace>, key: &str) -> Option<(&'static str, String)> {
