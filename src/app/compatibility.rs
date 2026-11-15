@@ -267,7 +267,7 @@ pub fn run(s: &mut Workspace, name: &str, args: &Value, tx: &mut Tx) {
             if known {
                 s.bindings
                     .enter_mode(name, args["once"].as_bool().unwrap_or(false));
-                s.inform(format!("Key mode: {name} · Escape to leave"));
+                // The mode chip names it for as long as it lasts, so no notice repeats it.
             } else {
                 s.notify(format!(
                     "Key mode {name:?} is not defined by this host's keymap."

@@ -425,6 +425,34 @@ pub(super) fn download_chip(s: &Workspace) -> El {
     ))
 }
 
+/// The innermost active key mode stays visible for as long as it is active, in the toolbar or
+/// floating over the pane, whether or not key sequence hints are on: an exclusive mode swallows
+/// the keys it does not bind, so its name is how a person knows why nothing answers. The name
+/// truncates; the tooltip keeps it whole and says how to leave.
+pub fn mode_chip(s: &Workspace) -> Option<El> {
+    let name = s.key_mode()?;
+    Some(chip(
+        row()
+            .key("mode-chip")
+            .role("status")
+            .h(28.)
+            .max_w(150.)
+            .px(8.)
+            .gap(5.)
+            .center_y()
+            .label(format!("Key mode: {name}"))
+            .help(format!("Key mode {name} · Escape to leave"))
+            .child(text("mode").font(ui(10.5)).color(rgb(muted())))
+            .child(
+                text(name.to_owned())
+                    .key("mode-name")
+                    .font(medium(11.5))
+                    .color(rgb(ink()))
+                    .truncate(),
+            ),
+    ))
+}
+
 /// A pending key sequence remains visible even without the toolbar row.
 pub fn sequence_chip(s: &Workspace) -> Option<El> {
     if !s.settings.terminal.key_sequence_hints {
@@ -451,14 +479,16 @@ pub fn sequence_chip(s: &Workspace) -> Option<El> {
 
 /// Only live status chips float when the toolbar is absent, never invisible bar controls.
 pub fn floating_status(s: &Workspace) -> Option<El> {
+    let mode = mode_chip(s);
     let sequence = sequence_chip(s);
     let download = super::downloads_view::chip_label(s).is_some();
-    if sequence.is_none() && !download {
+    if mode.is_none() && sequence.is_none() && !download {
         return None;
     }
     Some(
         row()
             .gap(8.)
+            .children(mode)
             .children(sequence)
             .children(download.then(|| download_chip(s))),
     )
@@ -492,6 +522,7 @@ pub fn toolbar(s: &Workspace) -> El {
         } else {
             tab_track(s, 34., 28.)
         })
+        .children(mode_chip(s))
         .child(sequence_chip(s).unwrap_or_else(el))
         .children(activity_chip(s))
         .child(download_chip(s))

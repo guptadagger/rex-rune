@@ -219,7 +219,7 @@ allowed set below is unchanged.
 | Supported | `pane.rename`, `pane.close_others` (confirmation), `pane.move_to_tab` (picker for another tab in the same session; optional `window_id`). No program is restarted by a move. |
 | Supported | `session.close/next/previous/refresh`; `client.host.switch/add/remove`; `client.tab.close_others` and `client.tab.move` (`direction`: `left/right` or `backward/forward`). |
 | Supported | `pane.select_all`, `pane.focus_next/focus_previous`, `client.font.increase/decrease/reset`, and `client.scroll.page_up/page_down` (one visible page). |
-| Supported | `client.mode.enter` (`name`, optional boolean `once`), `client.mode.exit/exit_all`: host-defined modes, nesting, sequences, exclusive modes, blocked keys and Escape to leave. |
+| Supported | `client.mode.enter` (`name`, optional boolean `once`), `client.mode.exit/exit_all`: host-defined modes, nesting, sequences, exclusive modes, blocked keys and Escape to leave. The innermost active mode, a once mode included, is named in a toolbar chip for as long as it lasts. |
 | Aliases | `pane.focus.left/right/up/down`, `pane.split.left/right/up/down/auto`, `pane.move.left/right/up/down`; `client.tab.move.backward/forward`; `client.find.open/next/previous` for `client.search[.next/.previous]`; `client.theme.change` for `client.theme.choose`. Find next/previous also accept `when = "searching"`. |
 | Supported | `client.prompt.previous/next` (`Ctrl Shift Up/Down`) moves only this client’s viewport between shell OSC 133 prompt groups, relative to the viewport top, without wrapping. No marks means no movement. Commands lists both; `pane.prompt_previous/prompt_next` are aliases. No PTY input, ownership claim or server layout change. Verified through real snapshots and live streams; see [M3.7 evidence](parity-2026-11/prompt-navigation.md). |
 | Recognized, not supported | `pane.move_to_new_tab`: the supported server API cannot create a window containing an existing block; `session.new_window` starts new programs. This produces an explicit Problems diagnostic and a notice when invoked, not a silent no-op. |
@@ -228,11 +228,13 @@ allowed set below is unchanged.
 Declare modes in the host's `init.lua`, using [Rex's key-mode
 syntax](https://www.superlogical.com/rex/docs/customize/key-modes); local
 `shortcuts.json` can bind entry/exit actions but does not define mode-scoped keys.
-Modes are cleared when the host, session, connection or keymap changes. Resize
-amounts and the same-session move picker above describe Linux behavior: the Mac
-action index does not publish full argument schemas, and exact Mac behavior beyond
-its documented examples is not claimed. Move-to-new-tab remains a gap in
-[#44](https://github.com/shuv1337/rex-rune/issues/44).
+Leaving a mode, running a once mode's key or Exit all key modes takes the chip
+away at once, as do Reload config and a changed host, session, connection or
+keymap, which clear the modes themselves. Entering a mode shows no notice of its
+own. Resize amounts and the same-session move picker above describe Linux
+behavior: the Mac action index does not publish full argument schemas, and exact
+Mac behavior beyond its documented examples is not claimed. Move-to-new-tab
+remains a gap in [#44](https://github.com/shuv1337/rex-rune/issues/44).
 
 ## Remote control
 

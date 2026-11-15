@@ -31,9 +31,10 @@ impl Summary {
 
 impl Workspace {
     /// The chip as the toolbar draws it. In a narrow window it waits for the briefer chips,
-    /// a key sequence in progress and bytes arriving, so the tab strip keeps its room and
-    /// the download chip behaves exactly as it does without this one. Near the minimum
-    /// window width it would leave the tab strip a sliver, so it is not drawn at all.
+    /// a key sequence in progress, an active key mode and bytes arriving, so the tab strip
+    /// keeps its room and the other chips behave exactly as they do without this one. Near
+    /// the minimum window width it would leave the tab strip a sliver, so it is not drawn
+    /// at all.
     pub fn activity_chip_shown(&self) -> Option<Summary> {
         // The toolbar's own width: interface zoom lays it out narrower than the window.
         let width = self.viewport[0] / self.ui_scale();
@@ -43,6 +44,7 @@ impl Workspace {
         let narrow = width < super::downloads_view::CHIP_FULL_WIDTH;
         if narrow
             && (self.bindings.sequence.depth > 0
+                || self.key_mode().is_some()
                 || super::downloads_view::chip_label(self).is_some())
         {
             return None;

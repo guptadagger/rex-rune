@@ -79,8 +79,9 @@ client, launcher and icons, never the `rex` server.
   including program-sent OSC 9 and OSC 777. Optional default-off activity
   sounds, per-kind switches, tab mute, service check and test.
 - **Shortcuts.** Layered keymaps from defaults, `init.lua`, `shortcuts.json` and
-  recording, with host-defined modes and multi-key sequences. Commands lists
-  actions; Rex action compatibility is a focused subset, not Mac parity.
+  recording, with host-defined modes, the innermost active one named in a chip,
+  and multi-key sequences. Commands lists actions; Rex action compatibility is
+  a focused subset, not Mac parity.
 - **Remote control.** Off by default for every host; exactly eight navigation
   actions can zoom panes and switch the display to the requesting host, but none
   can type, use the clipboard, open dialogs, change interface zoom or act on

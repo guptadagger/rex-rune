@@ -284,6 +284,36 @@ pub struct Context {
     pub connected: bool,
 }
 
+impl Context {
+    /// Whether the modes entered under this context still belong to `host`, `session` and that
+    /// host's keymap. A panel, a pane or the focused control may change without ending one.
+    pub fn owns_modes(
+        &self,
+        host: super::workspace::HostId,
+        session: Option<&str>,
+        generation: u64,
+        server_revision: u64,
+        connected: bool,
+    ) -> bool {
+        self.host == host
+            && self.session.as_deref() == session
+            && self.generation == generation
+            && self.server_revision == server_revision
+            && self.connected == connected
+    }
+
+    /// [`owns_modes`](Self::owns_modes) against the next key's context.
+    pub fn keeps_modes(&self, next: &Context) -> bool {
+        self.owns_modes(
+            next.host,
+            next.session.as_deref(),
+            next.generation,
+            next.server_revision,
+            next.connected,
+        )
+    }
+}
+
 #[derive(Default)]
 pub struct State {
     pub modes: Vec<(String, bool)>,

@@ -751,6 +751,24 @@ impl Workspace {
         }
     }
 
+    /// The innermost active key mode, while it still belongs to the host, session and keymap on
+    /// screen. `input.rs` ends modes when any of those changes, at the next key; the chip that
+    /// names one must not outlive the host or session it was entered on either.
+    pub fn key_mode(&self) -> Option<&str> {
+        let model = self.model();
+        let current = self.bindings.context.as_ref()?;
+        if !current.owns_modes(
+            self.hosts[self.active].id,
+            model.selected.as_deref(),
+            self.keymap_generation,
+            model.keymap_revision,
+            model.connected,
+        ) {
+            return None;
+        }
+        self.bindings.modes.last().map(|(name, _)| name.as_str())
+    }
+
     pub fn effective_keymap(&self) -> &rex_rune::keymap::Resolved {
         self.hosts[self.active]
             .model

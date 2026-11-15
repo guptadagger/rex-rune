@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- **The active key mode is named in a toolbar chip (#129).** A quiet `mode <name>` chip shows the innermost active mode for as long as it lasts, transient and once modes included, and leaves at once on Escape, Exit key mode, Exit all key modes, a once mode's own key, Reload config, or when its host, session, keymap or connection changes. Long names truncate with the whole name in the tooltip; the chip takes no focus, reserves no terminal space, ignores **Show key sequence hints**, and floats at the top left while the toolbar has no row (the title strip on macOS). Entering a mode no longer shows a notice of its own, because the chip now says it for the mode's whole life. Key routing, releases, remote availability and terminal geometry are unchanged. [Scope and checks](docs/parity-2026-11/key-mode-chip.md).
+
 ## 0.10.1 - 2026-11-14
 
 A Linux desktop-bus-loss fix and more reliable headless test fixtures.
