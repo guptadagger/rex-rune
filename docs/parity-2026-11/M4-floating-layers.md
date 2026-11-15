@@ -182,7 +182,8 @@ private HOME/XDG/TMPDIR, its socket and every process the run started are gone a
 `scripts/floating-layers-private.py` allocates its root inside a `try` whose `finally` removes it,
 and through `Desktop.close`/`stop_owned` terminates **and waits for** each client, openbox and
 Xvfb (bounded, then a kill and a wait) before any file is removed, including when a receipt copy
-fails. ``probe_fixture_cleanup.py`` (in this work's receipts) proves all of that with process
+fails. `probe_fixture_cleanup.py` (kept with this work's receipts under
+`~/.cache/agent-ws/issue139-corr-1248315/`) proves all of that with process
 doubles and no real process: a missing tool leaves 0 run roots, a failed receipt copy still
 removes the root, the exact borrowed `Desktop.close` body terminates and waits for all four
 children (and kills then waits when one ignores terminate), and a partial `Desktop.__init__`
@@ -202,8 +203,9 @@ selected `Restore g — Minimized, still running` without clipping.
 
 ## Corrections after independent review
 
-An independent review of `2253e7e` found four defects; each is fixed here with a test that fails
-on `2253e7e` at real dispatch, and the failure was seen before the fix.
+An independent review of `2253e7e` found four defects. Each is fixed here with a counterexample
+that fails on `2253e7e` — for the three client defects at real dispatch, for the fixture through
+its own process-double probe — and each failure was seen before the fix.
 
 - **A captured menu discarded its target.** `Intent::Layer(target, NewFloating)` returned before
   checking the target, and dispatch called the targetless `new_floating_pane`, so the new pane
@@ -233,7 +235,7 @@ on `2253e7e` at real dispatch, and the failure was seen before the fix.
   boundedly wait, then kill and wait for each owned child before files are removed; the
   borrowed `Desktop.__init__` also releases a partial start; receipts copy failures are
   recorded and never skip the removal; each run gets its own exclusive receipt directory and an
-  `identity.json`. ``probe_fixture_cleanup.py`` reproduces the leak, the zero waits and the
+  `identity.json`. `probe_fixture_cleanup.py` reproduces the leak, the zero waits and the
   leaked Xvfb on `2253e7e` with no real process, and shows 0 leaked roots and full reaps now.
 
 Two smaller corrections: the last-visible and no-anchor refusals no longer advise something that
