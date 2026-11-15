@@ -58,13 +58,7 @@ fn dispatch(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx, global_only: bool) ->
         connected: s.model().connected,
     };
     if s.bindings.context.as_ref() != Some(&context) {
-        if s.bindings
-            .context
-            .as_ref()
-            .is_some_and(|old| !old.keeps_modes(&context))
-        {
-            s.bindings.clear_modes();
-        }
+        s.bindings.adopt_modes(context.owner());
         s.bindings.sequence.clear();
         s.bindings.context = Some(context);
     }

@@ -16,6 +16,22 @@ use rune::{Cursor, El, PointerButton, ScrollPos, Tx, col, el, row, text};
 const IDENTITY_MIN: f32 = 120.;
 const IDENTITY_MAX: f32 = 210.;
 
+/// Below this toolbar width (the window's width divided by interface zoom) the bar is narrow:
+/// the key-mode chip is only the mode's name, the `mode` word yielding its room to the name it
+/// introduces, and the identity chip keeps its floor while a live chip is drawn. The accessible
+/// names and tooltips keep everything at every width.
+const NARROW_BAR: f32 = 1000.;
+
+/// A live chip never shrinks below this: its name is cut to a word's beginning, with the whole
+/// name in the tooltip, rather than the bar's Settings and Close leaving the window.
+const MODE_CHIP_FLOOR: f32 = 56.;
+const SEQUENCE_CHIP_FLOOR: f32 = 48.;
+
+/// The tab track's floor while both arrows are drawn: their whole 26 pt hit areas, the track's
+/// padding and the gaps between it and the scrolling strip. The arrows must never paint over
+/// the live chips that took the rest of the row.
+const TAB_TRACK_ARROWS: f32 = 3. * 2. + 26. + 2. + 26. + 2.;
+
 /// A chip's press: consume it (chips never drag the window) and keep the terminal focused.
 pub(super) fn chip_press(e: El) -> El {
     e.cursor(Cursor::Pointer)
@@ -34,6 +50,21 @@ pub(super) fn identity_detail(s: &Workspace) -> Option<(String, u32)> {
     } else {
         None
     }
+}
+
+/// The bar's own width: the window's divided by interface zoom, which is what it lays out in.
+fn narrow_bar(s: &Workspace) -> bool {
+    s.viewport[0] / s.ui_scale() < NARROW_BAR
+}
+
+/// Whether a live chip shares the bar with the identity chip. A mode, a pending sequence and a
+/// receiving download each take a chip's worth of the row, so on a narrow bar the identity keeps
+/// its floor and lets them and the bar's controls fit; otherwise it is as wide as its words.
+fn live_chip_shown(s: &Workspace) -> bool {
+    s.key_mode().is_some()
+        || s.settings.terminal.key_sequence_hints
+            && s.bindings.pending_label(s.effective_keymap()).is_some()
+        || super::downloads_view::chip_label(s).is_some()
 }
 
 fn identity(s: &Workspace) -> El {
@@ -66,7 +97,11 @@ fn identity(s: &Workspace) -> El {
             // As wide as its words, between a floor that keeps it a comfortable target and
             // the width a long name truncates at.
             .min_w(IDENTITY_MIN)
-            .max_w(IDENTITY_MAX)
+            .max_w(if narrow_bar(s) && live_chip_shown(s) {
+                IDENTITY_MIN
+            } else {
+                IDENTITY_MAX
+            })
             .h(34.)
             .pl(6.)
             .pr(8.)
@@ -291,12 +326,14 @@ pub(super) fn tab_track(s: &Workspace, track: f32, pill: f32) -> El {
     }
     track = track.child(strip);
     if overflow {
-        track = track.child(
-            chrome_button("next-tabs", &RIGHT, "Scroll next tabs", 26., |s, tx| {
-                s.scroll_tabs(1, tx)
-            })
-            .live_opacity(&s.tab_fade[1]),
-        );
+        track = track
+            .child(
+                chrome_button("next-tabs", &RIGHT, "Scroll next tabs", 26., |s, tx| {
+                    s.scroll_tabs(1, tx)
+                })
+                .live_opacity(&s.tab_fade[1]),
+            )
+            .min_w(TAB_TRACK_ARROWS);
     }
     chip_press(chip(track).on_press(|_: &mut Workspace| {}))
 }
@@ -428,28 +465,33 @@ pub(super) fn download_chip(s: &Workspace) -> El {
 /// The innermost active key mode stays visible for as long as it is active, in the toolbar or
 /// floating over the pane, whether or not key sequence hints are on: an exclusive mode swallows
 /// the keys it does not bind, so its name is how a person knows why nothing answers. The name
-/// truncates; the tooltip keeps it whole and says how to leave.
+/// truncates, and a narrow bar gives the `mode` word's room to the name. The accessible name
+/// and the tooltip keep the whole name at every width.
 pub fn mode_chip(s: &Workspace) -> Option<El> {
     let name = s.key_mode()?;
+    let mut words = row()
+        .key("mode-chip")
+        .role("status")
+        .h(28.)
+        .shrink()
+        .min_w(MODE_CHIP_FLOOR)
+        .max_w(150.)
+        .px(8.)
+        .gap(5.)
+        .center_y()
+        .label(format!("Key mode: {name}"))
+        .help(format!("Key mode {name} · Escape to leave"));
+    if !narrow_bar(s) {
+        words = words.child(text("mode").font(ui(10.5)).color(rgb(muted())));
+    }
     Some(chip(
-        row()
-            .key("mode-chip")
-            .role("status")
-            .h(28.)
-            .max_w(150.)
-            .px(8.)
-            .gap(5.)
-            .center_y()
-            .label(format!("Key mode: {name}"))
-            .help(format!("Key mode {name} · Escape to leave"))
-            .child(text("mode").font(ui(10.5)).color(rgb(muted())))
-            .child(
-                text(name.to_owned())
-                    .key("mode-name")
-                    .font(medium(11.5))
-                    .color(rgb(ink()))
-                    .truncate(),
-            ),
+        words.child(
+            text(name.to_owned())
+                .key("mode-name")
+                .font(medium(11.5))
+                .color(rgb(ink()))
+                .truncate(),
+        ),
     ))
 }
 
@@ -462,9 +504,12 @@ pub fn sequence_chip(s: &Workspace) -> Option<El> {
     Some(chip(
         el().key("pending-sequence")
             .h(28.)
+            .shrink()
+            .min_w(SEQUENCE_CHIP_FLOOR)
             .max_w(170.)
             .px(8.)
             .center_y()
+            .label(format!("Key sequence: {label}"))
             .help(format!(
                 "{label} — waiting for the next key; Escape cancels"
             ))

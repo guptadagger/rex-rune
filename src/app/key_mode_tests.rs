@@ -435,6 +435,15 @@ fn another_host_does_not_keep_the_name_and_reload_clears_it() {
 
     rt.update(|s, tx| s.activate_host(0, tx));
     settle(&mut rt);
+    assert_eq!(
+        chip_text(&rt),
+        None,
+        "coming back is not entering the mode again"
+    );
+    assert!(
+        rt.state.bindings.modes.is_empty(),
+        "the stack ended with the host it belonged to"
+    );
     ctrl(&mut rt, Code::KeyR, 'r');
     rt.frame(1. / 60.);
     assert_eq!(chip_text(&rt).as_deref(), Some("resize"));
@@ -487,6 +496,446 @@ fn the_title_row_and_its_strip_name_the_mode_too() {
         );
         press(&mut rt, Key::Escape);
         assert_eq!(chip_text(&rt), None, "{toolbar:?}");
+        std::fs::remove_file(&rt.state.settings_path).ok();
+    }
+}
+
+/// A mode an accepted action enters is named before any key, and the name is the state the
+/// next key dispatches from.
+#[test]
+fn an_accepted_entry_names_the_mode_before_any_key() {
+    let (mut ws, rx) = tabbed_workspace("split");
+    with_modes(&mut ws, false);
+    let mut rt = runtime(ws);
+    settle(&mut rt);
+    assert!(
+        rt.state.bindings.context.is_none(),
+        "no key has set an input context"
+    );
+    rt.update(|s, tx| {
+        assert!(actions::run(
+            s,
+            "client.mode.enter",
+            &json!({"name": "resize"}),
+            tx
+        ))
+    });
+    rt.frame(1. / 60.);
+    assert_eq!(
+        chip_text(&rt).as_deref(),
+        Some("resize"),
+        "the entry is accepted before a keypress, so it is named then too"
+    );
+    press(&mut rt, Key::Left);
+    assert_eq!(
+        requests(&rx).first().map(|r| r.0.as_str()),
+        Some("session.resize_pane"),
+        "the name and the routing are the same state"
+    );
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+/// The same for a once mode: it is named from entry, and its one key ends it.
+#[test]
+fn an_accepted_once_entry_is_named_until_its_key_runs() {
+    let (mut ws, rx) = tabbed_workspace("split");
+    with_modes(&mut ws, false);
+    let mut rt = runtime(ws);
+    settle(&mut rt);
+    rt.update(|s, tx| {
+        assert!(actions::run(
+            s,
+            "client.mode.enter",
+            &json!({"name": "once", "once": true}),
+            tx
+        ))
+    });
+    rt.frame(1. / 60.);
+    assert_eq!(chip_text(&rt).as_deref(), Some("once"));
+    press(&mut rt, Key::Right);
+    assert_eq!(chip_text(&rt), None, "its one key ran it");
+    assert_eq!(
+        requests(&rx).first().map(|r| r.0.as_str()),
+        Some("session.resize_pane")
+    );
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+/// A mode a host returns as a client action goes through the same entry, so it is named on the
+/// wake that accepted it rather than on the next key.
+#[test]
+fn a_mode_returned_by_a_host_wake_is_named_before_any_key() {
+    let (mut ws, rx) = tabbed_workspace("split");
+    with_modes(&mut ws, false);
+    *ws.hosts[0].connection.model.lock().unwrap() = ws.hosts[0].model.clone();
+    let mut rt = runtime(ws);
+    settle(&mut rt);
+    assert!(rt.state.bindings.context.is_none());
+    rt.update(|s, tx| {
+        s.hosts[0]
+            .connection
+            .model
+            .lock()
+            .unwrap()
+            .client_actions
+            .push(rex_rune::connection::actions::Queued {
+                generation: s.keymap_generation,
+                session: Some("s".into()),
+                block: Some("block:b".into()),
+                action: rexrs::api::client::ClientAction {
+                    action: "client.mode.enter".into(),
+                    args: Some(json!({"name": "resize"})),
+                },
+            });
+        s.sync(0, tx);
+    });
+    rt.frame(1. / 60.);
+    assert_eq!(
+        chip_text(&rt).as_deref(),
+        Some("resize"),
+        "an accepted returned action enters a mode this person can see"
+    );
+    press(&mut rt, Key::Left);
+    assert!(
+        requests(&rx).iter().any(|r| r.0 == "session.resize_pane"),
+        "and the next key really uses it"
+    );
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+/// A session the host selects and then selects back does not bring the old mode with it.
+#[test]
+fn a_session_round_trip_does_not_bring_the_old_mode_back() {
+    let (mut ws, _rx) = tabbed_workspace("split");
+    with_modes(&mut ws, false);
+    *ws.hosts[0].connection.model.lock().unwrap() = ws.hosts[0].model.clone();
+    let mut rt = runtime(ws);
+    settle(&mut rt);
+    ctrl(&mut rt, Code::KeyR, 'r');
+    rt.frame(1. / 60.);
+    assert_eq!(chip_text(&rt).as_deref(), Some("resize"));
+
+    rt.update(|s, tx| {
+        s.hosts[0].connection.model.lock().unwrap().selected = Some("other".into());
+        s.sync(0, tx);
+    });
+    settle(&mut rt);
+    assert_eq!(chip_text(&rt), None, "another session has no mode");
+
+    rt.update(|s, tx| {
+        s.hosts[0].connection.model.lock().unwrap().selected = Some("s".into());
+        s.sync(0, tx);
+    });
+    settle(&mut rt);
+    assert_eq!(
+        chip_text(&rt),
+        None,
+        "the session that had the mode does not keep it after a round trip"
+    );
+    assert!(rt.state.bindings.modes.is_empty());
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+/// A lost and regained connection, and a new server keymap revision, end the mode where they
+/// change; coming back is not entering again.
+#[test]
+fn a_connection_or_server_keymap_round_trip_does_not_bring_the_mode_back() {
+    let (mut ws, _rx) = tabbed_workspace("split");
+    with_modes(&mut ws, false);
+    *ws.hosts[0].connection.model.lock().unwrap() = ws.hosts[0].model.clone();
+    let mut rt = runtime(ws);
+    settle(&mut rt);
+    ctrl(&mut rt, Code::KeyR, 'r');
+    rt.frame(1. / 60.);
+    assert_eq!(chip_text(&rt).as_deref(), Some("resize"));
+
+    rt.update(|s, tx| {
+        s.hosts[0].connection.model.lock().unwrap().connected = false;
+        s.sync(0, tx);
+    });
+    settle(&mut rt);
+    assert_eq!(chip_text(&rt), None, "a lost connection has no mode");
+    assert!(rt.state.bindings.modes.is_empty());
+
+    rt.update(|s, tx| {
+        s.hosts[0].connection.model.lock().unwrap().connected = true;
+        s.sync(0, tx);
+    });
+    settle(&mut rt);
+    assert_eq!(chip_text(&rt), None, "reconnecting is not entering again");
+
+    ctrl(&mut rt, Code::KeyR, 'r');
+    rt.frame(1. / 60.);
+    assert_eq!(chip_text(&rt).as_deref(), Some("resize"));
+    rt.update(|s, tx| {
+        s.hosts[0].connection.model.lock().unwrap().keymap_revision += 1;
+        s.sync(0, tx);
+    });
+    settle(&mut rt);
+    assert_eq!(chip_text(&rt), None, "another server keymap has no mode");
+    assert!(rt.state.bindings.modes.is_empty());
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+/// A new local keymap is a change of its own; the mode ends with it.
+#[test]
+fn a_new_local_keymap_ends_the_mode_at_that_change() {
+    let (mut ws, _rx) = tabbed_workspace("split");
+    with_modes(&mut ws, false);
+    let mut rt = runtime(ws);
+    settle(&mut rt);
+    ctrl(&mut rt, Code::KeyR, 'r');
+    rt.frame(1. / 60.);
+    assert_eq!(chip_text(&rt).as_deref(), Some("resize"));
+    rt.update(|s, _tx| s.keymap_changed());
+    settle(&mut rt);
+    assert_eq!(chip_text(&rt), None);
+    assert!(
+        rt.state.bindings.modes.is_empty(),
+        "the stack is gone, not merely hidden"
+    );
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+/// The bar's live chips share one row with controls that must stay reachable: at the minimum
+/// window size every mandatory control and both tab arrows keep their place.
+fn bar_controls_fit(rt: &Runtime<Workspace>, width: f32, note: &str) {
+    let mut end = 0.;
+    for key in ["commands", "new-tab", "settings", "close-app"] {
+        let r = rect(rt, key);
+        assert!(
+            r[2] > 0. && r[0] >= 0. && r[0] + r[2] <= width + 0.5,
+            "{note}: {key} leaves the window: {r:?} of {width}"
+        );
+        assert!(
+            r[0] >= end - 0.5,
+            "{note}: {key} overlaps the control before it: {r:?}"
+        );
+        end = r[0] + r[2];
+    }
+    if has(rt, "tab-track") {
+        let track = rect(rt, "tab-track");
+        for key in ["previous-tabs", "next-tabs"] {
+            if has(rt, key) {
+                let arrow = rect(rt, key);
+                assert!(
+                    arrow[0] >= track[0] - 0.5 && arrow[0] + arrow[2] <= track[0] + track[2] + 0.5,
+                    "{note}: {key} is outside its track: {arrow:?} in {track:?}"
+                );
+            }
+        }
+        if has(rt, "mode-chip") {
+            let chip = rect(rt, "mode-chip");
+            for key in ["previous-tabs", "next-tabs"] {
+                if has(rt, key) {
+                    let arrow = rect(rt, key);
+                    assert!(
+                        arrow[0] + arrow[2] <= chip[0] + 0.5,
+                        "{note}: {key} covers the mode chip: {arrow:?} {chip:?}"
+                    );
+                }
+            }
+            assert!(
+                chip[2] >= 40.,
+                "{note}: the chip keeps room for its name: {chip:?}"
+            );
+            assert!(
+                chip[0] + chip[2] <= rect(rt, "settings")[0] + 0.5,
+                "{note}: the chip clears Settings: {chip:?}"
+            );
+            if has(rt, "pending-sequence") {
+                assert!(
+                    chip[0] + chip[2] <= rect(rt, "pending-sequence")[0] + 0.5,
+                    "{note}: the sequence chip follows the mode chip"
+                );
+            }
+        }
+    }
+}
+
+fn with_download(ws: &mut Workspace) {
+    let mut transfer = rex_rune::download::Transfer::new(
+        1,
+        "s".into(),
+        "block:b".into(),
+        "~/img-a.iso".into(),
+        std::env::temp_dir(),
+        1,
+    );
+    transfer.name = Some("img-a.iso".into());
+    transfer.state = rex_rune::download::State::Receiving {
+        received: 30,
+        hint: 600,
+    };
+    ws.hosts[0].model.downloads.push(transfer);
+}
+
+#[test]
+fn the_chip_row_keeps_the_controls_and_tab_arrows_at_640() {
+    let (width, height) = (640., 480.);
+
+    // A long mode alone: the arrows keep their whole hit areas inside the track.
+    {
+        let (mut ws, _rx) = tabbed_workspace("split");
+        with_modes(&mut ws, false);
+        let mut rt = runtime_at(ws, (width, height));
+        settle(&mut rt);
+        assert_eq!(
+            rt.state.viewport[0], width,
+            "the fixture width is the layout width"
+        );
+        ctrl(&mut rt, Code::KeyR, 'r');
+        ctrl(&mut rt, Code::KeyL, 'l');
+        settle(&mut rt);
+        assert_eq!(chip_text(&rt).as_deref(), Some(LONG));
+        bar_controls_fit(&rt, width, "a long mode");
+        assert!(has(&rt, "previous-tabs") && has(&rt, "next-tabs"));
+        std::fs::remove_file(&rt.state.settings_path).ok();
+    }
+
+    // The failing combination: a long mode and a pending sequence together.
+    {
+        let (mut ws, _rx) = tabbed_workspace("split");
+        with_modes(&mut ws, false);
+        let (sender, _sent) = flume::unbounded();
+        for block in ["block:b", "block:c"] {
+            framed_terminal(&mut ws, block, &sender, b"$ cargo test\r\nok");
+        }
+        let mut rt = runtime_at(ws, (width, height));
+        settle(&mut rt);
+        let grid = rect(&rt, "grid:block:b");
+        ctrl(&mut rt, Code::KeyR, 'r');
+        ctrl(&mut rt, Code::KeyL, 'l');
+        ctrl(&mut rt, Code::KeyB, 'b');
+        settle(&mut rt);
+        assert_eq!(chip_text(&rt).as_deref(), Some(LONG));
+        assert!(has(&rt, "pending-sequence"));
+        bar_controls_fit(&rt, width, "a long mode and a pending sequence");
+        let chip = rt
+            .elements()
+            .into_iter()
+            .find(|e| !e.exiting && e.key.as_deref() == Some("mode-chip"))
+            .unwrap();
+        assert_eq!(
+            chip.label.as_deref(),
+            Some(format!("Key mode: {LONG}").as_str()),
+            "the cut name keeps its whole accessible name"
+        );
+        assert_eq!(
+            chip.help.as_deref(),
+            Some(format!("Key mode {LONG} · Escape to leave").as_str()),
+            "and its whole tooltip"
+        );
+        assert_eq!(
+            rect(&rt, "grid:block:b"),
+            grid,
+            "the terminal keeps its rect"
+        );
+        std::fs::remove_file(&rt.state.settings_path).ok();
+    }
+
+    // A long host name as well: the identity chip gives up its extra width first.
+    {
+        let (mut ws, _rx) = tabbed_workspace("split");
+        ws.settings.hosts[0].label = "a-long-host-name-on-the-identity-chip".into();
+        with_modes(&mut ws, false);
+        let mut rt = runtime_at(ws, (width, height));
+        settle(&mut rt);
+        ctrl(&mut rt, Code::KeyR, 'r');
+        ctrl(&mut rt, Code::KeyL, 'l');
+        ctrl(&mut rt, Code::KeyB, 'b');
+        settle(&mut rt);
+        assert_eq!(chip_text(&rt).as_deref(), Some(LONG));
+        bar_controls_fit(
+            &rt,
+            width,
+            "a long host, a long mode and a pending sequence",
+        );
+        assert!(
+            rect(&rt, "identity")[2] >= 119.5,
+            "the identity chip keeps its floor"
+        );
+        std::fs::remove_file(&rt.state.settings_path).ok();
+    }
+
+    // A download chip takes its room too, in its existing short narrow form.
+    {
+        let (mut ws, _rx) = tabbed_workspace("split");
+        with_modes(&mut ws, false);
+        with_download(&mut ws);
+        let mut rt = runtime_at(ws, (width, height));
+        settle(&mut rt);
+        ctrl(&mut rt, Code::KeyR, 'r');
+        ctrl(&mut rt, Code::KeyL, 'l');
+        settle(&mut rt);
+        assert_eq!(chip_text(&rt).as_deref(), Some(LONG));
+        assert!(has(&rt, "download-chip"));
+        bar_controls_fit(&rt, width, "a long mode and a download");
+        std::fs::remove_file(&rt.state.settings_path).ok();
+    }
+
+    // With no mode the bar is what it was: a pending sequence still fits.
+    {
+        let (mut ws, _rx) = tabbed_workspace("split");
+        with_modes(&mut ws, false);
+        let mut rt = runtime_at(ws, (width, height));
+        settle(&mut rt);
+        assert!(!has(&rt, "mode-chip"));
+        ctrl(&mut rt, Code::KeyB, 'b');
+        settle(&mut rt);
+        assert!(has(&rt, "pending-sequence"));
+        bar_controls_fit(&rt, width, "a pending sequence with no mode");
+        std::fs::remove_file(&rt.state.settings_path).ok();
+    }
+}
+
+/// The name-only composition is the narrow one; a wide bar still names the chip's own word.
+#[test]
+fn a_narrow_bar_drops_the_mode_word_and_a_wide_one_keeps_it() {
+    for (size, word) in [((1024., 700.), true), ((640., 480.), false)] {
+        let (mut ws, _rx) = tabbed_workspace("split");
+        with_modes(&mut ws, false);
+        let mut rt = runtime_at(ws, size);
+        settle(&mut rt);
+        ctrl(&mut rt, Code::KeyR, 'r');
+        rt.frame(1. / 60.);
+        assert_eq!(chip_text(&rt).as_deref(), Some("resize"), "{size:?}");
+        assert_eq!(
+            element_text(&rt, "mode-chip").contains(&"mode".to_owned()),
+            word,
+            "{size:?}: the mode word"
+        );
+        let chip = rt
+            .elements()
+            .into_iter()
+            .find(|e| !e.exiting && e.key.as_deref() == Some("mode-chip"))
+            .unwrap();
+        assert_eq!(
+            chip.label.as_deref(),
+            Some("Key mode: resize"),
+            "{size:?}: the accessible name keeps the word"
+        );
+        std::fs::remove_file(&rt.state.settings_path).ok();
+    }
+}
+
+/// Real fonts are process-global: run each capture test on its own with `REX_TEST_SNAP_DIR`.
+#[test]
+fn mode_chip_draws_with_a_pending_sequence() {
+    let Some(mut camera) = super::pane_verb_tests::Camera::new() else {
+        return;
+    };
+    let _families = rune::text::with_families("Inter", "IBM Plex Mono");
+    for (prefix, size) in [
+        ("mode-chip-sequence", (1024., 700.)),
+        ("mode-chip-sequence-minimum", (640., 480.)),
+    ] {
+        let mut rt = painted_runtime(size, false);
+        ctrl(&mut rt, Code::KeyR, 'r');
+        ctrl(&mut rt, Code::KeyL, 'l');
+        ctrl(&mut rt, Code::KeyB, 'b');
+        settle(&mut rt);
+        camera.snap(&mut rt, prefix);
         std::fs::remove_file(&rt.state.settings_path).ok();
     }
 }

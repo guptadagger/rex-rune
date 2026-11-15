@@ -229,9 +229,14 @@ Declare modes in the host's `init.lua`, using [Rex's key-mode
 syntax](https://www.superlogical.com/rex/docs/customize/key-modes); local
 `shortcuts.json` can bind entry/exit actions but does not define mode-scoped keys.
 Leaving a mode, running a once mode's key or Exit all key modes takes the chip
-away at once, as do Reload config and a changed host, session, connection or
-keymap, which clear the modes themselves. Entering a mode shows no notice of its
-own. Resize amounts and the same-session move picker above describe Linux
+away at once. A mode belongs to the host, session, keymap and connection it was
+entered under, and Reload config, a changed host, session, connection or keymap
+end it where that change happens rather than at the next key: switching away and
+back does not bring back a mode that was ended that way. The chip appears the
+moment an accepted entry takes the mode, whether a key or a host action ran it;
+entering a mode shows no notice of its own. In a narrow window the chip is the
+mode's name alone, cut to fit, with the whole name in its tooltip. Resize
+amounts and the same-session move picker above describe Linux
 behavior: the Mac action index does not publish full argument schemas, and exact
 Mac behavior beyond its documented examples is not claimed. Move-to-new-tab
 remains a gap in [#44](https://github.com/shuv1337/rex-rune/issues/44).

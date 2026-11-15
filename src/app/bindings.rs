@@ -284,39 +284,37 @@ pub struct Context {
     pub connected: bool,
 }
 
-impl Context {
-    /// Whether the modes entered under this context still belong to `host`, `session` and that
-    /// host's keymap. A panel, a pane or the focused control may change without ending one.
-    pub fn owns_modes(
-        &self,
-        host: super::workspace::HostId,
-        session: Option<&str>,
-        generation: u64,
-        server_revision: u64,
-        connected: bool,
-    ) -> bool {
-        self.host == host
-            && self.session.as_deref() == session
-            && self.generation == generation
-            && self.server_revision == server_revision
-            && self.connected == connected
-    }
+/// What a key mode belongs to: the host, session, keymap generation, server revision and
+/// connection it was entered under. A panel, a pane or the focused control may change without
+/// ending one. One record serves entry, the next key and the state changes in between, so a
+/// mode ends at the change rather than at the key after it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Owner {
+    pub host: super::workspace::HostId,
+    pub session: Option<String>,
+    pub generation: u64,
+    pub server_revision: u64,
+    pub connected: bool,
+}
 
-    /// [`owns_modes`](Self::owns_modes) against the next key's context.
-    pub fn keeps_modes(&self, next: &Context) -> bool {
-        self.owns_modes(
-            next.host,
-            next.session.as_deref(),
-            next.generation,
-            next.server_revision,
-            next.connected,
-        )
+impl Context {
+    /// The ownership part of this per-key context.
+    pub fn owner(&self) -> Owner {
+        Owner {
+            host: self.host,
+            session: self.session.clone(),
+            generation: self.generation,
+            server_revision: self.server_revision,
+            connected: self.connected,
+        }
     }
 }
 
 #[derive(Default)]
 pub struct State {
     pub modes: Vec<(String, bool)>,
+    /// Who the mode stack belongs to; `None` until a mode is entered.
+    pub owner: Option<Owner>,
     /// Map used for the current sequence, including mode blocks and priority.
     pub mode_map: Option<Resolved>,
     pub sequence: Sequence,
@@ -333,6 +331,15 @@ impl State {
     pub fn enter_mode(&mut self, name: &str, once: bool) {
         self.sequence.clear();
         self.modes.push((name.into(), once));
+    }
+    /// Take the mode stack as `owner`'s: a stack entered under another host, session, keymap
+    /// generation, server revision or connection ends here, so switching away and back cannot
+    /// show a mode nobody entered again.
+    pub fn adopt_modes(&mut self, owner: Owner) {
+        if self.owner.as_ref() != Some(&owner) {
+            self.clear_modes();
+        }
+        self.owner = Some(owner);
     }
     pub fn exit_mode(&mut self) {
         self.sequence.clear();
